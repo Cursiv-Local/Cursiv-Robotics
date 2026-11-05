@@ -40,6 +40,7 @@ fn main() {
     let base = std::env::var_os("CURSIV_BENCH_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let dir = base.join(format!("cursiv-bench-{}", std::process::id()));
     let science_max: u64 = std::env::var("CURSIV_BENCH_SCIENCE_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
+    let batch: u64 = std::env::var("CURSIV_BENCH_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let store_seg: u64 = std::env::var("CURSIV_BENCH_SEGMENT").ok().and_then(|v| v.parse().ok()).unwrap_or(cursiv_evidence::segment::DEFAULT_SEGMENT_RECORDS);
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -68,8 +69,8 @@ fn main() {
         let mut n = 0u64;
         while n < per {
             let t = Instant::now();
-            let mut envs = Vec::with_capacity(100);
-            for _ in 0..100.min(per - n) {
+            let mut envs = Vec::with_capacity(batch as usize);
+            for _ in 0..batch.min(per - n) {
                 n += 1;
                 let obs = Observation {
                     schema: OBSERVATION_SCHEMA.into(), observation_id: format!("{rid}-obs-{n:08}"), robot_id: rid.clone(), mission_id: "bench".into(),
@@ -135,11 +136,11 @@ fn main() {
     let result = serde_json::json!({
         "schema": "cursiv-bench-rust-1",
         "measured_on": format!("{} {} (software benchmark on this computer, not robot hardware)", std::env::consts::OS, std::env::consts::ARCH),
-        "records": total, "robots": robots,
+        "records": total, "robots": robots, "batch": batch,
         "package_bytes": tree_bytes(&pkg),
         "sign_records_per_s": (total as f64 / sign_s).round(),
         "ingest_records_per_s": (total as f64 / ingest_s).round(),
-        "ingest_batch100_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "max": pct(1.0)},
+        "ingest_batch_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "max": pct(1.0)},
         "export_s": export_s, "verify_s": verify_s, "verify_records_per_s": (total as f64 / verify_s).round(),
         "science_s": science_s, "science_flags": sci_counts, "package_version": 2, "segment_records": store_seg, "reopen_s": reopen_s,
         "peak_rss_mib": peak_rss_kib().map(|k| (k as f64 / 1024.0 * 10.0).round() / 10.0),
