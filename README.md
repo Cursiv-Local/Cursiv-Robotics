@@ -45,6 +45,10 @@ python3 -m pip install cryptography pytest
 cd python && python3 -m cursiv_sim.demo        # 12-step demonstration, all data SYNTHETIC
 ```
 
+**Real data without a robot:** record with your phone (phyphox) and run
+`py -m cursiv_field run <export.zip> ... --mission <name>` to get signed evidence and a research dossier
+(Markdown and PDF) that Cursiv can import and write up. See the [phone guide](docs/PHONE_GUIDE.md).
+
 | Document | |
 |---|---|
 | [Code audit](docs/ROBOTICS_CODE_AUDIT.md) | What Cursiv has, what was reused, what was missing |
@@ -52,6 +56,7 @@ cd python && python3 -m cursiv_sim.demo        # 12-step demonstration, all data
 | [Architecture](docs/ROBOTICS_ARCHITECTURE.md) | Components, data model, trade-offs |
 | [Threat model](docs/ROBOTICS_THREAT_MODEL.md) | Trust boundaries, controls, residual risks |
 | [API](docs/ROBOTICS_API.md) · [OpenAPI](docs/openapi.json) | Ingestion API and CLIs |
+| [Phone guide](docs/PHONE_GUIDE.md) | Real recordings from your phone to a research dossier for Cursiv |
 | [Simulation guide](docs/ROBOTICS_SIMULATION_GUIDE.md) | Demo, faults, writing an agent |
 | [Test results](docs/ROBOTICS_TEST_RESULTS.md) | Measured results and benchmarks |
 | [Roadmap](docs/ROBOTICS_ROADMAP.md) | Next milestones and standards |
@@ -62,5 +67,6 @@ cd python && python3 -m cursiv_sim.demo        # 12-step demonstration, all data
 | `crates/cursiv-bridge` | Loopback HTTP ingestion service |
 | `crates/cursiv-verify` | Standalone verifier CLI |
 | `python/cursiv_sim` | Simulation lab, robot agent, ROS 2 adapter boundary, faults, benchmarks |
+| `python/cursiv_field` | Real data: phyphox phone recordings, research dossier (Markdown, HTML, PDF) |
 
 MIT License. Attribution: [NOTICE.md](NOTICE.md).

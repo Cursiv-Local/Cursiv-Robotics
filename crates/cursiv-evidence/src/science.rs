@@ -36,6 +36,10 @@ pub struct Region {
     pub max_lon: f64,
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -44,6 +48,10 @@ pub struct Profile {
     pub region: Option<Region>,
     /// Offset between sensor time and receipt time beyond which the clock is suspect.
     pub max_clock_offset_s: f64,
+    /// Compare sensor clocks with station receipt times. Turn off for data imported after
+    /// the fact (e.g. phone recordings), where receipt time says nothing about the sensor clock.
+    #[serde(default = "yes")]
+    pub check_clock_against_receipts: bool,
     /// Agreement threshold, in combined standard uncertainties.
     pub contradiction_sigma: f64,
 }
@@ -64,7 +72,7 @@ impl Profile {
         types.insert("image".into(), TypeProfile { unit: "".into(), min: None, max: None, requires_attachment: true, compare_radius_m: None, compare_window_s: None });
         Profile { name: "survey-default-1".into(), types,
                   region: Some(Region { min_lat: 44.9, max_lat: 45.3, min_lon: -122.6, max_lon: -122.0 }),
-                  max_clock_offset_s: 120.0, contradiction_sigma: 3.0 }
+                  max_clock_offset_s: 120.0, contradiction_sigma: 3.0, check_clock_against_receipts: true }
     }
 }
 
@@ -121,7 +129,9 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
     let corrected: std::collections::HashSet<String> = records.iter()
         .filter_map(|(r, _)| r.observation.correction.as_ref().map(|c| format!("{}/{}", r.robot_id, c.corrects_observation_id))).collect();
     let current: Vec<&Record> = records.iter().map(|(r, _)| r)
-        .filter(|r| !corrected.contains(&format!("{}/{}", r.robot_id, r.observation.observation_id))).collect();
+        .filter(|r| !corrected.contains(&format!("{}/{}", r.robot_id, r.observation.observation_id)))
+        // measured data only: derived results and findings are judged by `reasoning`, through their inputs
+        .filter(|r| !matches!(r.observation.provenance.source.as_str(), "derived" | "interpretation")).collect();
 
     // per-record checks
     let mut last_time: HashMap<(String, String), (f64, String)> = HashMap::new();
@@ -173,7 +183,7 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
                 last_time.insert(key, (t, o.observation_id.clone()));
                 if let Some(rcv) = received.get(&(r.robot_id.clone(), r.seq)) {
                     offsets.entry(r.robot_id.clone()).or_default().push((t, rcv - t, o.observation_id.clone()));
-                    if t - rcv > 5.0 {
+                    if profile.check_clock_against_receipts && t - rcv > 5.0 {
                         flag("sensor_time_in_future", "assumed", format!("sensor time is {} after the station received it (assuming the station clock is correct)", human(t - rcv)), &r.robot_id, id.clone());
                     }
                 }
@@ -191,6 +201,9 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
     // clock drift: offset (receipt - sensor time) that grows steadily, beyond the configured limit.
     // Live delivery delay is only a few seconds; stored-and-forwarded records (offline) are excluded by
     // using the minimum offset per window, which tracks the clock rather than the link.
+    if !profile.check_clock_against_receipts {
+        offsets.clear();
+    }
     for (robot, mut v) in offsets {
         v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         if v.len() < 6 {

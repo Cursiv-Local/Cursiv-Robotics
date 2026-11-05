@@ -27,6 +27,7 @@ produced by Cursiv's own code for interoperability testing.
 | BagIt File Packaging Format, RFC 8493 | IETF RFC | `crates/cursiv-evidence/src/package.rs`, `verify.rs` |
 | RFC 6962 Merkle tree hashing (leaf/node prefixes) | IETF RFC | `crates/cursiv-evidence/src/merkle.rs` |
 | IOOS QARTOD flag scheme | U.S. IOOS public manuals | `python/cursiv_sim/qartod.py` |
+| phyphox export file format (ZIP, CSV variants, `meta/time.csv`, `meta/device.csv`), as written by phyphox-android `DataExport.java` | phyphox (RWTH Aachen University); format only, no phyphox code is used or copied | `python/cursiv_field/phyphox.py` |
 
 ## Third-party software used (as dependencies, not vendored)
 
