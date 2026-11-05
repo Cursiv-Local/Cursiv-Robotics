@@ -144,3 +144,18 @@ def test_iphone_export_format(tmp_path):
     assert field.main(["run", str(f), "--mission", "iphone-1", "--station", str(station), "--no-pdf"]) == 0
     md = next((station / "reports").iterdir()).joinpath("dossier.md").read_text()
     assert "Apple iPhone14,5" in md and "phyphox 1.2.1" in md and "2026-11-05T10:00:00.000Z" in md
+
+
+def test_zip_bombs_are_refused_before_decompression(tmp_path, monkeypatch):
+    bomb = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("Accelerometer.csv", "0" * (4 * 1024 * 1024))     # 4 MiB of zeros compresses to a few KiB
+    monkeypatch.setattr(phyphox, "MAX_MEMBER", 1024 * 1024)
+    with pytest.raises(ValueError, match="refusing"):
+        phyphox.read(bomb)
+    many = tmp_path / "many.zip"
+    with zipfile.ZipFile(many, "w") as z:
+        for i in range(phyphox.MAX_MEMBERS + 1):
+            z.writestr(f"f{i}.csv", "t\n")
+    with pytest.raises(ValueError, match="refusing"):
+        phyphox.read(many)

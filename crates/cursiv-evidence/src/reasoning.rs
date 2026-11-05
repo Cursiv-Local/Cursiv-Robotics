@@ -97,21 +97,36 @@ fn value(o: &Observation) -> Option<(f64, &str)> {
 }
 
 fn convert(x: f64, from: &str, to: &str) -> Option<f64> {
-    Some(match (from, to) {
-        ("degC", "K") => x + 273.15,
-        ("K", "degC") => x - 273.15,
-        ("degC", "degF") => x * 9.0 / 5.0 + 32.0,
-        ("degF", "degC") => (x - 32.0) * 5.0 / 9.0,
-        ("hPa", "Pa") => x * 100.0,
-        ("Pa", "hPa") => x / 100.0,
-        ("hPa", "kPa") => x / 10.0,
-        ("kPa", "hPa") => x * 10.0,
-        ("%", "1") => x / 100.0,
-        ("1", "%") => x * 100.0,
-        ("m", "cm") => x * 100.0,
-        ("cm", "m") => x / 100.0,
-        _ => return None,
-    })
+    crate::units::convert(x, from, to)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Propagation {
+    /// Propagated standard uncertainty.
+    Value(f64),
+    /// At least one input's uncertainty is unknown.
+    InputUnknown,
+    /// This operation has no propagation rule here (min, max, median, stddev, count).
+    NoRule,
+}
+
+/// GUM first-order propagation for uncorrelated inputs.
+pub fn propagate(op: &str, params: &serde_json::Value, units: &[&str], u: &[Option<f64>]) -> Propagation {
+    if !matches!(op, "mean" | "sum" | "linear" | "convert") {
+        return Propagation::NoRule;
+    }
+    if u.iter().any(|x| x.is_none()) || u.is_empty() {
+        return Propagation::InputUnknown;
+    }
+    let us: Vec<f64> = u.iter().map(|x| x.unwrap()).collect();
+    let rss = us.iter().fold(0.0, |a, x| a + x * x).sqrt();
+    let v = match op {
+        "mean" => Some(rss / us.len() as f64),
+        "sum" => Some(rss),
+        "linear" => params["a"].as_f64().map(|a| a.abs() * us[0]),
+        _ => params["to"].as_str().and_then(|to| crate::units::affine(units[0], to)).map(|(a, _)| a.abs() * us[0]),
+    };
+    v.map_or(Propagation::NoRule, Propagation::Value)
 }
 
 /// Recompute a derivation. Ok((value, unit)) or Err(why it cannot be recomputed).
@@ -217,7 +232,7 @@ pub fn analyse(records: &[(Record, String)], science: Option<&ScienceReport>) ->
         }
     }
     let mut cx = Ctx { by_id, corrected, flags: Vec::new() };
-    let mut counts: BTreeMap<String, usize> = ["verified", "mismatch", "not_reproducible", "inputs_missing"].iter().map(|k| (k.to_string(), 0)).collect();
+    let mut counts: BTreeMap<String, usize> = ["verified", "mismatch", "not_reproducible", "inputs_missing", "uncertainty_verified"].iter().map(|k| (k.to_string(), 0)).collect();
     let mut findings = Vec::new();
 
     for (r, _) in records {
@@ -235,6 +250,7 @@ pub fn analyse(records: &[(Record, String)], science: Option<&ScienceReport>) ->
             let params = step.parameters.clone().unwrap_or_default();
             let op = params["op"].as_str().unwrap_or("").to_string();
             let mut inputs = Vec::new();
+            let mut in_u: Vec<Option<f64>> = Vec::new();
             let mut missing = Vec::new();
             let mut synthetic_input = false;
             for id in &o.provenance.derived_from {
@@ -248,7 +264,10 @@ pub fn analyse(records: &[(Record, String)], science: Option<&ScienceReport>) ->
                             cx.flag("derivation_input_superseded", "warning", r, format!("input {id} was later corrected; the derivation uses the original value"));
                         }
                         match value(&inp.observation) {
-                            Some(v) => inputs.push(v),
+                            Some(v) => {
+                                inputs.push(v);
+                                in_u.push(inp.observation.measurement.as_ref().and_then(crate::science::standard_u));
+                            }
                             None => missing.push(format!("{id} has no numeric value")),
                         }
                     }
@@ -269,6 +288,25 @@ pub fn analyse(records: &[(Record, String)], science: Option<&ScienceReport>) ->
                     let close = (v - rv).abs() <= REL_TOL * v.abs().max(1.0);
                     if close && unit == ru {
                         *counts.get_mut("verified").unwrap() += 1;
+                        let units: Vec<&str> = inputs.iter().map(|(_, u)| *u).collect();
+                        let stated = o.measurement.as_ref().and_then(crate::science::standard_u);
+                        match (propagate(&op, &params["params"], &units, &in_u), stated) {
+                            (Propagation::Value(e), Some(su)) => {
+                                if (e - su).abs() <= 1e-6 * e.abs().max(1e-12) {
+                                    *counts.get_mut("uncertainty_verified").unwrap() += 1;
+                                } else {
+                                    cx.flag("uncertainty_mismatch", "error", r, format!(
+                                        "stated standard uncertainty {su} {unit}; propagating the inputs' uncertainties (uncorrelated) gives {e:.6} {unit}"));
+                                }
+                            }
+                            (Propagation::InputUnknown, Some(_)) => cx.flag("uncertainty_unsupported", "error", r,
+                                "states an uncertainty although at least one input's uncertainty is unknown".into()),
+                            (Propagation::NoRule, Some(_)) => cx.flag("uncertainty_unpropagated", "warning", r, format!(
+                                "states an uncertainty for {op}, which has no propagation rule here; the record must say how it was obtained")),
+                            (Propagation::Value(e), None) => cx.flag("uncertainty_not_stated", "info", r, format!(
+                                "the inputs support a propagated standard uncertainty of {e:.6} {unit} (uncorrelated), but none is stated")),
+                            _ => {}
+                        }
                     } else {
                         *counts.get_mut("mismatch").unwrap() += 1;
                         cx.flag("derivation_mismatch", "error", r, format!("{op} of {} input(s) recomputes to {v} {unit}; the record says {rv} {ru}", inputs.len()));

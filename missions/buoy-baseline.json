@@ -1,0 +1,27 @@
+{
+  "mission_id": "buoy-baseline-1",
+  "seed": 7,
+  "start_utc": "2026-06-01T00:00:00Z",
+  "duration_s": 7200,
+  "tick_s": 60,
+  "description": "A two-hour clean baseline: one moored buoy, no faults. Expected: everything verifies and no anomaly is flagged.",
+  "platforms": [
+    {
+      "robot_id": "buoy-02",
+      "kind": "stationary",
+      "start": [
+        44.62,
+        -124.06
+      ],
+      "interval_s": 60,
+      "sync_every_s": 300,
+      "sensors": [
+        "water_temperature",
+        "conductivity",
+        "dissolved_oxygen",
+        "air_pressure"
+      ]
+    }
+  ],
+  "faults": []
+}

@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Rust tests (unit, integration, property, mutation fuzz)
+        run: cargo test --release --locked
+      - name: Clippy
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: Python dependencies
+        run: python -m pip install pytest cryptography bagit securesystemslib
+      - name: Python tests (simulation lab, virtual missions vs documented results, phone importer, integration, interop)
+        timeout-minutes: 15
+        run: python -m pytest tests -v -o faulthandler_timeout=120
+      - name: One-command demo (PowerShell)
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\demo.ps1
+      - name: One-command demo (sh)
+        if: runner.os != 'Windows'
+        timeout-minutes: 10
+        run: sh scripts/demo.sh
+      - name: Benchmark (software on the CI runner, not robot hardware)
+        shell: bash
+        run: cargo run --release --locked -p cursiv-evidence --example bench -- 5000 3 bench-${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench-${{ matrix.os }}.json
+
+  msrv:
+    name: Rust 1.82 (minimum supported)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82
+      - run: cargo test --locked --workspace
+
+  audit:
+    name: Dependency advisories (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

@@ -25,6 +25,14 @@ pub struct TypeProfile {
     /// Two observations of this type closer than these are expected to agree within uncertainty.
     pub compare_radius_m: Option<f64>,
     pub compare_window_s: Option<f64>,
+    /// Expected sampling interval; a gap longer than 2.5x this between consecutive readings of
+    /// one sensor is flagged as missing observations (scientific completeness, not cryptographic).
+    #[serde(default)]
+    pub expected_interval_s: Option<f64>,
+    /// Only compare readings within this vertical separation (location alt_m; negative = depth).
+    /// Different depths or heights legitimately differ (thermoclines, lapse rate).
+    #[serde(default)]
+    pub compare_vertical_m: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +69,7 @@ impl Profile {
     pub fn survey_default() -> Self {
         let t = |unit: &str, min: f64, max: f64, r: Option<f64>, w: Option<f64>| TypeProfile {
             unit: unit.into(), min: Some(min), max: Some(max), requires_attachment: false, compare_radius_m: r, compare_window_s: w,
+            expected_interval_s: None, compare_vertical_m: None,
         };
         let mut types = BTreeMap::new();
         types.insert("soil_moisture".into(), t("%", 0.0, 100.0, Some(25.0), Some(3600.0)));
@@ -69,7 +78,7 @@ impl Profile {
         types.insert("air_temperature".into(), t("degC", -90.0, 60.0, Some(200.0), Some(600.0)));
         types.insert("relative_humidity".into(), t("%", 0.0, 100.0, Some(200.0), Some(600.0)));
         types.insert("air_pressure".into(), t("hPa", 300.0, 1100.0, Some(500.0), Some(600.0)));
-        types.insert("image".into(), TypeProfile { unit: "".into(), min: None, max: None, requires_attachment: true, compare_radius_m: None, compare_window_s: None });
+        types.insert("image".into(), TypeProfile { unit: "".into(), min: None, max: None, requires_attachment: true, compare_radius_m: None, compare_window_s: None, expected_interval_s: None, compare_vertical_m: None });
         Profile { name: "survey-default-1".into(), types,
                   region: Some(Region { min_lat: 44.9, max_lat: 45.3, min_lon: -122.6, max_lon: -122.0 }),
                   max_clock_offset_s: 120.0, contradiction_sigma: 3.0, check_clock_against_receipts: true }
@@ -106,7 +115,8 @@ fn haversine_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     2.0 * r * h.sqrt().asin()
 }
 
-fn standard_u(m: &crate::model::Measurement) -> Option<f64> {
+/// Standard (1 sigma) uncertainty of a measurement, from its stated kind.
+pub fn standard_u(m: &crate::model::Measurement) -> Option<f64> {
     let u = m.uncertainty.as_ref()?;
     Some(match u.kind.as_str() {
         "standard" => u.value,
@@ -135,6 +145,7 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
 
     // per-record checks
     let mut last_time: HashMap<(String, String), (f64, String)> = HashMap::new();
+    let mut seen_content: HashMap<(String, String, u64, String), String> = HashMap::new();
     let mut offsets: HashMap<String, Vec<(f64, f64, String)>> = HashMap::new();
     for r in &current {
         let o = &r.observation;
@@ -144,11 +155,26 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
             flag("type_unprofiled", "unknown", format!("no profile for observation type {:?}: range and unit not checked", o.observation_type), &r.robot_id, id.clone());
         }
         if let (Some(p), Some(m)) = (prof, &o.measurement) {
-            if !p.unit.is_empty() && m.unit != p.unit {
-                flag("unit_mismatch", "known", format!("{} recorded in {:?}; profile expects {:?} (not converted)", o.observation_type, m.unit, p.unit), &r.robot_id, id.clone());
-            } else if let Some(v) = m.value {
-                if p.min.is_some_and(|lo| v < lo) || p.max.is_some_and(|hi| v > hi) {
-                    flag("out_of_range", "known", format!("{} = {v} {} is outside the profile range {:?}..{:?}", o.observation_type, m.unit, p.min, p.max), &r.robot_id, id.clone());
+            // Range-check in the profile's unit; a convertible unit is converted (the record is not changed).
+            let in_profile_unit = match m.value {
+                Some(v) if p.unit.is_empty() || m.unit == p.unit => Some(v),
+                Some(v) => match crate::units::convert(v, &m.unit, &p.unit) {
+                    Some(c) => {
+                        flag("unit_converted", "known", format!("{} recorded in {} was converted to {} for checking ({v} -> {c:.6})", o.observation_type, m.unit, p.unit, ), &r.robot_id, id.clone());
+                        Some(c)
+                    }
+                    None => {
+                        flag("unit_mismatch", "known", format!("{} recorded in {:?}; profile expects {:?} and there is no conversion", o.observation_type, m.unit, p.unit), &r.robot_id, id.clone());
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(v) = in_profile_unit {
+                // tolerance for floating-point rounding in unit conversion (140 degF is exactly 60 degC)
+                let eps = 1e-9 * v.abs().max(1.0);
+                if p.min.is_some_and(|lo| v < lo - eps) || p.max.is_some_and(|hi| v > hi + eps) {
+                    flag("out_of_range", "known", format!("{} = {v} {} is outside the profile range {:?}..{:?}", o.observation_type, p.unit, p.min, p.max), &r.robot_id, id.clone());
                 }
             }
             if m.value.is_some() && m.uncertainty.is_none() {
@@ -160,7 +186,27 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
                 flag("missing_supporting_evidence", "known", format!("{} observation has no attached raw evidence", o.observation_type), &r.robot_id, id.clone());
             }
         }
+        if let Some(m) = &o.measurement {
+            if !m.unit.is_empty() && !crate::units::known(&m.unit) {
+                flag("unit_unrecognized", "unknown", format!("unit {:?} is not in the unit registry: conversions and unit checks are not possible", m.unit), &r.robot_id, id.clone());
+            }
+            // the same reading resubmitted under a new observation id (replay, double upload, buggy firmware)
+            if let (Some(v), Some(st)) = (m.value, &o.sensor_time) {
+                let key = (o.sensor.sensor_id.clone(), st.clone(), v.to_bits(), m.unit.clone());
+                if let Some(first) = seen_content.get(&key) {
+                    flag("duplicate_content", "known", format!("same sensor, time, value and unit as {first}, under a different observation id"), &r.robot_id,
+                         vec![first.clone(), o.observation_id.clone()]);
+                } else {
+                    seen_content.insert(key, o.observation_id.clone());
+                }
+            }
+        }
         let t = o.sensor_time.as_deref().and_then(parse_utc);
+        if let (Some(st), Some(wt)) = (t, r.written_time.as_deref().and_then(parse_utc)) {
+            if st > wt + 2.0 {
+                flag("sensor_time_after_write", "known", format!("the reading's sensor time is {} after the robot wrote the record (inconsistent clocks)", human(st - wt)), &r.robot_id, id.clone());
+            }
+        }
         match &o.sensor.calibration {
             None => flag("calibration_unknown", "unknown", format!("calibration status of sensor {} was not recorded", o.sensor.sensor_id), &r.robot_id, id.clone()),
             Some(c) => {
@@ -176,6 +222,13 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
             Some(t) => {
                 let key = (r.robot_id.clone(), o.sensor.sensor_id.clone());
                 if let Some((prev, prev_id)) = last_time.get(&key) {
+                    if let Some(exp) = prof.and_then(|p| p.expected_interval_s).filter(|e| *e > 0.0) {
+                        if t - prev > 2.5 * exp {
+                            let missing = ((t - prev) / exp).round() as i64 - 1;
+                            flag("sampling_gap", "known", format!("{} between {prev_id} and this reading; at the expected {exp} s interval about {missing} reading(s) are missing",
+                                                                   human(t - prev)), &r.robot_id, vec![prev_id.clone(), o.observation_id.clone()]);
+                        }
+                    }
                     if t < *prev {
                         flag("out_of_order_time", "known", format!("sensor time goes backwards by {} relative to {prev_id} (written earlier by the same sensor)", human(prev - t)), &r.robot_id, vec![prev_id.clone(), o.observation_id.clone()]);
                     }
@@ -258,6 +311,11 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
                     continue;
                 }
                 let (la, lb) = (a.location.as_ref().unwrap(), b.location.as_ref().unwrap());
+                if let (Some(v), Some(za), Some(zb)) = (p.compare_vertical_m, la.alt_m, lb.alt_m) {
+                    if (za - zb).abs() > v {
+                        continue; // different depths or heights: not expected to agree
+                    }
+                }
                 let d = haversine_m((la.lat, la.lon), (lb.lat, lb.lon));
                 if d > radius {
                     continue;

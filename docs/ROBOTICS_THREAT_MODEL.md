@@ -45,13 +45,30 @@ layer: robot motion or safety (out of scope by design).
 | AI or analyst over-claiming | Findings must cite evidence; AI cannot be the authority for `known`; caveats propagate through derivations; citations of corrected values flagged | `findings_are_checked...`, suite 17 |
 | Commanding robots | No endpoint or code path sends commands; the robot reads only acceptance results and head counts | design |
 
+## Controls added in pre-hardware hardening (2026-11-05)
+
+| Threat | Control | Test |
+|---|---|---|
+| Disk full or write failure corrupts the store | Storage quota (507, nothing changes); fail-stop after any write error; restart rebuilds from disk | `faults.rs` quota and fail-stop tests |
+| Revoked key keeps signing until restart | Live trust reload; a malformed trust file is refused and the old one kept | `faults.rs::trust_store_reload_takes_effect_immediately` |
+| Partial package mistaken for a complete one | Atomic export via a hidden `.partial-*` folder | `faults.rs::an_interrupted_export_leaves_no_package_behind` |
+| Concurrent uploads corrupt an attachment | Unique temp files, first complete copy wins | `faults.rs::concurrent_uploads_of_the_same_attachment_do_not_corrupt_it` |
+| A panic poisons the store lock | Poisoned locks answer 503 instead of crashing every worker | code review |
+| Zip bombs in phone exports | Size and count limits checked before decompression | `test_field.py::test_zip_bombs_are_refused_before_decompression` |
+| Line-ending conversion silently changes signed files (Windows git) | `.gitattributes` keeps evidence byte-exact | Windows CI |
+| Tampered or untrusted package enters a research workspace | Importer verifies first, re-verifies the copy, fingerprints the source before and after, quarantines on request | `tests/test_integration.py` |
+| Malformed input crashes the verifier | Property tests and seeded mutation fuzzing | `properties.rs` |
+
 ## Residual risks (not solved here)
 
-- **Key custody**: robot and station keys are files with 0600 permissions, not hardware-backed (TPM/HSM/secure element). A stolen robot key can sign false but "authentic" records until it is revoked.
+- **Key custody**: robot and station keys are files with 0600 permissions on Linux/macOS (on Windows they inherit the folder's ACL), not hardware-backed (TPM/HSM/secure element). A stolen robot key can sign false but "authentic" records until it is revoked.
 - **Trust store integrity**: whoever can edit `trust.json` decides who is trusted.
 - **No external timestamping or witness**: a station that holds its own key could rewrite its whole store and re-sign it. Mitigation: hand checkpoints to an independent party (roadmap: transparency log or RFC 3161).
 - **Station clock** is assumed correct for drift and "future time" checks; these flags are labelled *assumed*.
 - **TLS** is not provided; off-host use with `--token-file` should sit behind a TLS terminator on a trusted network.
-- **Dependency vulnerabilities**: `cargo audit` was not run in this environment (not installed). Direct dependencies are few (ed25519-dalek, sha2, serde, serde_json, base64, hex, rand_core, tiny_http); add `cargo audit`/`cargo deny` to CI.
+- **Slow clients**: tiny_http has no read timeout, so slow senders can tie up worker threads (loopback-only by default; use a reverse proxy with timeouts off-host).
+- **Store start-up** trusts its own disk (chains and hashes are re-read, robot signatures are not re-checked); `cursiv-verify` re-checks every signature in every package.
+- **Verifier memory** grows with package size (about 3.3 KiB per record); there is no total limit yet.
+- **Dependency vulnerabilities**: `cargo audit` found 0 advisories on 2026-11-05 (67 crates) and now runs in CI. Direct dependencies are few (ed25519-dalek, sha2, serde, serde_json, base64, hex, rand_core, tiny_http).
 - **At-rest encryption** of the store is not implemented (Cursiv's vault is desktop-only).
 - Live **ROS 2** input is unverified.

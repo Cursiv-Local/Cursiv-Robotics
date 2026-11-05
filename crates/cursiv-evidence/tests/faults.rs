@@ -233,7 +233,7 @@ fn fault_4_duplicates_are_idempotent_or_rejected() {
     let mut l = lab("dup");
     let r = &mut l.robots[0];
     let e1 = r.record(r.obs(1, "air_temperature", 10.0, "2026-11-05T10:00:00Z"));
-    assert!(matches!(l.store.ingest_batch(&[e1.clone()]).unwrap()[0], Outcome::Accepted { .. }));
+    assert!(matches!(l.store.ingest_batch(std::slice::from_ref(&e1)).unwrap()[0], Outcome::Accepted { .. }));
     assert!(matches!(l.store.ingest_batch(&[e1]).unwrap()[0], Outcome::Duplicate { .. }), "retry is idempotent");
     let r = &mut l.robots[0];
     let again = r.obs(1, "air_temperature", 11.0, "2026-11-05T10:01:00Z"); // same observation_id, new content
@@ -435,9 +435,14 @@ fn hostile_package_paths_and_links_are_refused() {
     let p = l.export("pkg");
     fs::create_dir_all(p.join("data/blobs/sha256")).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink("/etc/passwd", p.join("data/blobs/sha256/link")).unwrap();
-    let r = l.verify(&p);
-    assert_eq!(r.verdicts.structure, "fail");
+    let linked = std::os::unix::fs::symlink("/etc/passwd", p.join("data/blobs/sha256/link")).is_ok();
+    // Windows only lets administrators or Developer Mode create symbolic links; without one there is nothing to test.
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file("C:\\Windows\\win.ini", p.join("data/blobs/sha256/link")).is_ok();
+    if linked {
+        assert_eq!(l.verify(&p).verdicts.structure, "fail", "a symbolic link inside a package is refused");
+        fs::remove_file(p.join("data/blobs/sha256/link")).unwrap();
+    }
     // manifest naming ../ paths
     let m: Envelope = serde_json::from_str(&fs::read_to_string(p.join("manifest.json")).unwrap()).unwrap();
     let mut body: serde_json::Value = serde_json::from_str(&m.body_text().unwrap()).unwrap();
@@ -609,4 +614,161 @@ fn findings_are_checked_against_the_evidence_they_cite() {
     for code in ["ai_claim_marked_known", "unsupported_claim", "citation_missing", "citation_superseded", "synthetic_propagation"] {
         assert!(rs.flags.iter().any(|f| f.code == code), "missing {code}");
     }
+}
+
+// ---- reliability: storage exhaustion, failed writes, concurrent uploads, atomic export ------
+
+#[test]
+fn storage_quota_refuses_cleanly_and_nothing_changes() {
+    let mut l = lab("quota");
+    l.survey(2);
+    let used = l.store.used_bytes();
+    l.store.set_quota(Some(used + 500));
+    let r = &mut l.robots[0];
+    let envs: Vec<Envelope> = (10..14).map(|k| { let o = r.obs(k, "air_temperature", 1.0, "2026-11-05T10:00:00Z"); r.record(o) }).collect();
+    let out = l.store.ingest_batch(&envs).unwrap();
+    assert!(out.iter().all(|o| matches!(o, Outcome::Rejected { code, .. } if code == "storage_full")), "{out:?}");
+    assert_eq!(out[0].http_status(), 507);
+    assert_eq!(l.store.robot_count("rover-01"), 2, "nothing admitted");
+    let blob = vec![1u8; 10_000];
+    assert_eq!(l.store.blobs().put(&blob[..], &sha256_hex(&blob), blob.len() as u64).unwrap_err().0, 507);
+    l.store.set_quota(None);
+    assert!(l.store.ingest_batch(&envs).unwrap().iter().all(|o| matches!(o, Outcome::Accepted { .. })), "resend after freeing space works");
+}
+
+#[test]
+fn a_failed_write_stops_the_store_and_restart_recovers_from_disk() {
+    let mut l = lab("failstop");
+    l.survey(3);
+    let f = l.dir.join("store/robots/rover-01/records.jsonl");
+    let aside = l.dir.join("aside.jsonl");
+    fs::rename(&f, &aside).unwrap();
+    fs::create_dir(&f).unwrap(); // the next append cannot open the file: an I/O failure
+    let r = &mut l.robots[0];
+    let o = r.obs(50, "air_temperature", 1.0, "2026-11-05T10:00:00Z");
+    let e = r.record(o);
+    assert!(l.store.ingest_batch(std::slice::from_ref(&e)).is_err());
+    assert!(l.store.failed().is_some());
+    assert!(l.store.ingest_batch(std::slice::from_ref(&e)).is_err(), "no further writes once memory may be ahead of disk");
+    assert!(matches!(l.store.ingest_checkpoint(&l.robots[1].checkpoint()), Outcome::Rejected { ref code, .. } if code == "store_failed"));
+    fs::remove_dir(&f).unwrap();
+    fs::rename(&aside, &f).unwrap();
+    let mut store = Store::open(&l.dir.join("store"), "station-a", Identity::from_seed(l.station), l.trust.clone()).unwrap();
+    assert_eq!(store.robot_count("rover-01"), 3, "state rebuilt from disk; the failed record was never stored");
+    assert!(matches!(store.ingest_batch(&[e]).unwrap()[0], Outcome::Accepted { .. }), "and can now be resent");
+}
+
+#[test]
+fn concurrent_uploads_of_the_same_attachment_do_not_corrupt_it() {
+    let l = lab("uploads");
+    let blob: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let sha = sha256_hex(&blob);
+    let blobs = l.store.blobs();
+    let handles: Vec<_> = (0..8).map(|_| {
+        let (b, data, sha) = (blobs.clone(), blob.clone(), sha.clone());
+        std::thread::spawn(move || b.put(&data[..], &sha, data.len() as u64))
+    }).collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results.iter().all(|r| r.is_ok()), "{results:?}");
+    assert!(results.iter().any(|r| matches!(r, Ok(true))));
+    assert_eq!(sha256_hex(&fs::read(l.dir.join("store/blobs/sha256").join(&sha)).unwrap()), sha);
+    assert!(fs::read_dir(l.dir.join("store/blobs/tmp")).unwrap().next().is_none());
+}
+
+#[test]
+fn an_interrupted_export_leaves_no_package_behind() {
+    let mut l = lab("atomic-export");
+    l.survey(2);
+    fs::create_dir(l.dir.join("store/blobs/sha256").join("not-a-file")).unwrap(); // copying it fails mid-export
+    let dest = l.dir.join("exports/pkg");
+    assert!(l.store.export(&dest).is_err());
+    assert!(!dest.exists());
+    assert!(fs::read_dir(l.dir.join("exports")).unwrap().next().is_none(), "no partial folder left");
+    fs::remove_dir(l.dir.join("store/blobs/sha256/not-a-file")).unwrap();
+    l.store.export(&dest).unwrap();
+    assert!(l.store.export(&dest).is_err(), "never overwrites an existing package");
+    assert!(l.verify(&dest).all_pass());
+}
+
+#[test]
+fn trust_store_reload_takes_effect_immediately() {
+    let mut l = lab("reload");
+    let mut t = l.trust.clone();
+    t.robots.get_mut("rover-01").unwrap()[0].status = "revoked".into();
+    l.store.set_trust(t);
+    let r = &mut l.robots[0];
+    let e = r.record(r.obs(1, "air_temperature", 1.0, "2026-11-05T10:00:00Z"));
+    assert!(matches!(l.store.ingest_batch(&[e]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "revoked_key"));
+}
+
+// ---- scientific checks: units, duplicates, gaps, timestamps, uncertainty propagation ---------
+
+#[test]
+fn units_duplicates_gaps_and_timestamps_are_checked() {
+    let mut l = lab("units");
+    let r = &mut l.robots[0];
+    let mut f = r.obs(1, "air_temperature", 140.0, "2026-11-05T10:00:00Z"); // 140 degF = 60 degC: in range after conversion
+    f.measurement.as_mut().unwrap().unit = "degF".into();
+    let mut hot = r.obs(2, "air_temperature", 200.0, "2026-11-05T10:01:00Z"); // 200 degF = 93 degC: out of range
+    hot.measurement.as_mut().unwrap().unit = "degF".into();
+    let mut odd = r.obs(3, "air_temperature", 1.0, "2026-11-05T10:02:00Z");
+    odd.measurement.as_mut().unwrap().unit = "furlongs".into();
+    let a = r.obs(4, "air_temperature", 15.0, "2026-11-05T10:03:00Z");
+    let mut replay = a.clone();
+    replay.observation_id = "rover-01-replayed".into(); // same reading, new id
+    let late = r.obs(6, "air_temperature", 15.0, "2026-11-05T11:30:00Z"); // long gap
+    let envs = [f, hot, odd, a, replay, late].map(|o| r.record(o));
+    let mut early_write = r.obs(7, "air_temperature", 15.0, "2026-11-05T12:00:00Z");
+    early_write.observation_id = "rover-01-written-early".into();
+    let rec = Record { schema: RECORD_SCHEMA.into(), robot_id: "rover-01".into(), seq: r.hashes.len() as u64 + 1, prev: r.hashes.last().unwrap().clone(),
+                       written_time: Some("2026-11-05T11:00:00Z".into()), observation: early_write };
+    let e = r.key.sign_json(RECORD_TYPE, &rec);
+    r.hashes.push(e.payload_hash());
+    let mut all = envs.to_vec();
+    all.push(e);
+    l.store.ingest_batch(&all).unwrap();
+    let rep = l.verify(&l.export("pkg"));
+    let mut prof = Profile::survey_default();
+    prof.types.get_mut("air_temperature").unwrap().expected_interval_s = Some(60.0);
+    let s = science::validate(&rep.records, &rep.receipts, &prof);
+    let n = |c: &str| s.counts.get(c).copied().unwrap_or(0);
+    assert_eq!(n("unit_converted"), 2, "{:?}", s.counts);
+    assert_eq!(n("out_of_range"), 1, "only the 200 degF reading is out of range in degC");
+    assert_eq!(n("unit_unrecognized"), 1);
+    assert_eq!(n("unit_mismatch"), 1, "no conversion exists from furlongs");
+    assert_eq!(n("duplicate_content"), 1);
+    assert!(n("sampling_gap") >= 1);
+    assert_eq!(n("sensor_time_after_write"), 1);
+}
+
+#[test]
+fn derived_uncertainty_is_propagated_and_checked() {
+    let mut l = lab("uncert");
+    let r = &mut l.robots[0];
+    let ins: Vec<Observation> = (1..=4).map(|k| r.obs(k, "air_temperature", 10.0 + k as f64, "2026-11-05T10:00:00Z")).collect(); // u = 0.2 each
+    let mut envs: Vec<Envelope> = ins.iter().map(|o| r.record(o.clone())).collect();
+    let refs: Vec<&Observation> = ins.iter().collect();
+    let with_u = |o: &mut Observation, u: Option<f64>| o.measurement.as_mut().unwrap().uncertainty = u.map(|v| Uncertainty { kind: "standard".into(), value: v, coverage_k: None });
+    let mut good = derived(r, 10, "mean", &refs, 12.5, true);
+    with_u(&mut good, Some(0.1));                       // sqrt(4 * 0.04) / 4 = 0.1
+    let mut overclaimed = derived(r, 11, "mean", &refs, 12.5, true);
+    with_u(&mut overclaimed, Some(0.01));               // claims 10x more precision than the inputs allow
+    let mut no_inputs_u: Vec<Observation> = ins.clone();
+    for (k, o) in no_inputs_u.iter_mut().enumerate() {
+        o.observation_id = format!("rover-01-nou-{k}");
+        o.measurement.as_mut().unwrap().uncertainty = None;
+    }
+    envs.extend(no_inputs_u.iter().map(|o| r.record(o.clone())));
+    let nrefs: Vec<&Observation> = no_inputs_u.iter().collect();
+    let mut invented = derived(r, 12, "mean", &nrefs, 12.5, true);
+    with_u(&mut invented, Some(0.1));                   // an uncertainty from inputs that have none
+    for o in [good, overclaimed, invented] {
+        envs.push(r.record(o));
+    }
+    l.store.ingest_batch(&envs).unwrap();
+    let (_, rs) = reason(&l, "pkg");
+    assert_eq!(rs.derivations["verified"], 3, "the values all match");
+    assert_eq!(rs.derivations["uncertainty_verified"], 1);
+    assert!(rs.flags.iter().any(|f| f.code == "uncertainty_mismatch"));
+    assert!(rs.flags.iter().any(|f| f.code == "uncertainty_unsupported"));
 }

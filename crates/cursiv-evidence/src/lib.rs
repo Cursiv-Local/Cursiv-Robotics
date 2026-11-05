@@ -14,4 +14,5 @@ pub mod reasoning;
 pub mod science;
 pub mod store;
 pub mod trust;
+pub mod units;
 pub mod verify;

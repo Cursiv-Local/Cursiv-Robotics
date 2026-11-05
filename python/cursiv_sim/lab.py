@@ -47,6 +47,7 @@ class Lab:
         self.robot_state = self.dir / "robots"
         self.trust_path = self.dir / "trust.json"
         self.station_key = self.dir / "station.key"
+        self.extra_args: list[str] = []        # e.g. ["--max-store-bytes", "200000"]
 
     def enrol(self) -> dict:
         """Operator step: generate keys and write the trust store out of band (never via the API)."""
@@ -73,7 +74,7 @@ class Lab:
         self.proc = subprocess.Popen(
             [str(binary("cursiv-bridge")), "serve", "--store", str(self.dir / "store"), "--station-id", self.station_id,
              "--key", str(self.station_key), "--trust", str(self.trust_path), "--bind", f"127.0.0.1:{self.port}",
-             "--queue", str(self.queue), "--workers", str(self.workers)],
+             "--queue", str(self.queue), "--workers", str(self.workers), *self.extra_args],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         for _ in range(200):
             try:

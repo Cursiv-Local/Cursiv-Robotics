@@ -1,0 +1,3 @@
+# Keep the lockfile compatible with the minimum supported Rust (rust-version in Cargo.toml).
+[resolver]
+incompatible-rust-versions = "fallback"

@@ -2,7 +2,7 @@
 //!
 //!   cursiv-bridge keygen <key-file>
 //!   cursiv-bridge serve --store <dir> --station-id <id> --key <key-file> --trust <trust.json>
-//!                       [--bind 127.0.0.1:8750] [--token-file <file>] [--queue 256] [--workers 4]
+//!                       [--bind 127.0.0.1:8750] [--token-file <file>] [--queue 256] [--workers 4] [--max-store-bytes N]
 //!
 //! Security: binds loopback only unless an API token is configured; checks the Host
 //! header (DNS-rebinding defence, as Cursiv's Field Station server does); refuses
@@ -17,7 +17,7 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -86,7 +86,10 @@ fn writer(store: Arc<Mutex<Store>>, rx: Receiver<Job>) {
             }
         }
         let all: Vec<Envelope> = jobs.iter().flat_map(|j| j.envs.iter().cloned()).collect();
-        let result = store.lock().unwrap().ingest_batch(&all);
+        let result = match store.lock() {
+            Ok(mut g) => g.ingest_batch(&all),
+            Err(_) => Err("the store lock was poisoned by an earlier failure; restart the service".to_string()),
+        };
         match result {
             Ok(outcomes) => {
                 let mut it = outcomes.into_iter();
@@ -105,6 +108,12 @@ fn writer(store: Arc<Mutex<Store>>, rx: Receiver<Job>) {
 }
 
 impl App {
+    /// The store lock. If a thread panicked while holding it, the store's in-memory state may
+    /// be inconsistent: answer 503 instead of crashing every later request.
+    fn store(&self) -> Result<MutexGuard<'_, Store>, Response<std::io::Cursor<Vec<u8>>>> {
+        self.store.lock().map_err(|_| err(503, "store_failed", "an internal error stopped the store; restart the service (it recovers from disk)"))
+    }
+
     fn host_ok(&self, req: &Request) -> bool {
         let Some(h) = header(req, "Host") else { return false };
         let h = h.to_ascii_lowercase();
@@ -136,11 +145,13 @@ impl App {
         match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(Ok(outcomes)) => {
                 let worst = outcomes.iter().map(|o| o.http_status()).max().unwrap_or(200);
-                let status = if outcomes.len() == 1 { worst } else { 207 };
+                // one status for the whole batch when every record got the same answer (e.g. 507 storage full)
+                let uniform = outcomes.iter().all(|o| o.http_status() == worst);
+                let status = if outcomes.len() == 1 || uniform { worst } else { 207 };
                 let accepted = outcomes.iter().filter(|o| matches!(o, Outcome::Accepted { .. })).count();
                 json(status, serde_json::json!({"accepted": accepted, "results": outcomes}))
             }
-            Ok(Err(e)) => err(500, "write_failed", &e),
+            Ok(Err(e)) => err(503, "store_failed", &e),
             Err(_) => err(504, "timeout", "the write did not complete in time; the outcome is unknown, retry (retries are idempotent)"),
         }
     }
@@ -166,12 +177,12 @@ impl App {
         match (method, seg.as_slice()) {
             (Method::Get, ["v1", "health"]) => json(200, serde_json::json!({"status": "ok", "service": "cursiv-bridge", "version": env!("CARGO_PKG_VERSION"), "time": model::now_utc()})),
             (Method::Get, ["v1", "openapi.json"]) => Response::from_string(OPENAPI).with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
-            (Method::Get, ["v1", "status"]) => json(200, self.store.lock().unwrap().status()),
+            (Method::Get, ["v1", "status"]) => json(200, match self.store() { Ok(g) => g, Err(r) => return r }.status()),
             (Method::Get, ["v1", "robots", id, "head"]) => {
                 if !model::valid_id(id) {
                     return err(400, "bad_robot_id", "invalid robot id");
                 }
-                let s = self.store.lock().unwrap();
+                let s = match self.store() { Ok(g) => g, Err(r) => return r };
                 let st = s.status();
                 let r = &st["robots"][*id];
                 json(200, serde_json::json!({"robot_id": id, "count": r["records"].as_u64().unwrap_or(0), "head": r["head"].as_str().unwrap_or(model::GENESIS)}))
@@ -195,14 +206,14 @@ impl App {
                 match serde_json::from_slice::<Envelope>(&body) {
                     Err(e) => err(400, "malformed_envelope", &e.to_string()),
                     Ok(env) => {
-                        let o = self.store.lock().unwrap().ingest_checkpoint(&env);
+                        let o = match self.store() { Ok(g) => g, Err(r) => return r }.ingest_checkpoint(&env);
                         json(o.http_status(), serde_json::to_value(&o).unwrap())
                     }
                 }
             }
             (Method::Put, ["v1", "attachments", sha]) => {
                 let Some(len) = req.body_length() else { return err(411, "length_required", "Content-Length is required") };
-                let blobs = self.store.lock().unwrap().blobs();
+                let blobs = match self.store() { Ok(g) => g, Err(r) => return r }.blobs();
                 match blobs.put(req.as_reader(), sha, len as u64) {
                     Ok(true) => json(201, serde_json::json!({"sha256": sha, "stored": true})),
                     Ok(false) => json(200, serde_json::json!({"sha256": sha, "stored": false, "note": "already present"})),
@@ -210,7 +221,7 @@ impl App {
                 }
             }
             (Method::Get, ["v1", "attachments", sha]) => {
-                let present = self.store.lock().unwrap().has_blob(sha);
+                let present = match self.store() { Ok(g) => g, Err(r) => return r }.has_blob(sha);
                 json(if present { 200 } else { 404 }, serde_json::json!({"sha256": sha, "present": present}))
             }
             (Method::Post, ["v1", "exports"]) => {
@@ -220,7 +231,7 @@ impl App {
                     return err(400, "bad_name", "export name must be 1-64 of [a-z0-9._-]");
                 }
                 let dest = self.exports.join(&name);
-                match self.store.lock().unwrap().export(&dest) {
+                match match self.store() { Ok(g) => g, Err(r) => return r }.export(&dest) {
                     Ok(v) => json(201, v),
                     Err(e) => err(409, "export_failed", &e),
                 }
@@ -232,13 +243,18 @@ impl App {
                 if !model::valid_id(&name) {
                     return err(400, "bad_name", "package must be the name of an export");
                 }
-                let trust = self.store.lock().unwrap().trust().clone();
+                let trust = match self.store() { Ok(g) => g, Err(r) => return r }.trust().clone();
                 let r = verify::verify_package(&self.exports.join(&name), Some(&trust));
                 json(200, serde_json::to_value(&r).unwrap())
             }
             (Method::Post, ["v1", "trust", "reload"]) => match TrustStore::load(&self.trust_path) {
-                Ok(_) => err(501, "restart_required", "trust store changes take effect on restart in this version"),
-                Err(e) => err(400, "trust_invalid", &e),
+                // Operator action: re-read the trust file. A broken file is refused and the current one kept.
+                Ok(t) => {
+                    let (robots, stations) = (t.robots.len(), t.stations.len());
+                    match self.store() { Ok(mut g) => g.set_trust(t), Err(r) => return r }
+                    json(200, serde_json::json!({"reloaded": true, "robots": robots, "stations": stations}))
+                }
+                Err(e) => err(400, "trust_invalid", &format!("{e}; the current trust store is unchanged")),
             },
             _ => err(404, "not_found", "no such endpoint"),
         }
@@ -262,7 +278,7 @@ fn main() {
         }
         Some("serve") => serve(&args),
         _ => {
-            eprintln!("usage:\n  cursiv-bridge keygen <key-file>\n  cursiv-bridge serve --store DIR --station-id ID --key FILE --trust FILE [--bind 127.0.0.1:8750] [--token-file F] [--queue 256] [--workers 4]");
+            eprintln!("usage:\n  cursiv-bridge keygen <key-file>\n  cursiv-bridge serve --store DIR --station-id ID --key FILE --trust FILE [--bind 127.0.0.1:8750] [--token-file F] [--queue 256] [--workers 4] [--max-store-bytes N]");
             std::process::exit(2)
         }
     }
@@ -288,7 +304,13 @@ fn serve(args: &[String]) {
         eprintln!("--bind must be address:port");
         std::process::exit(2)
     });
-    let token = arg(args, "--token-file").map(|p| std::fs::read_to_string(p).expect("token file").trim().to_string());
+    let token = arg(args, "--token-file").map(|p| match std::fs::read_to_string(&p) {
+        Ok(t) => t.trim().to_string(),
+        Err(e) => {
+            eprintln!("cannot read --token-file {p}: {e}");
+            std::process::exit(2)
+        }
+    });
     if token.as_ref().is_some_and(|t| t.len() < 32) {
         eprintln!("the API token must be at least 32 characters");
         std::process::exit(2)
@@ -299,10 +321,19 @@ fn serve(args: &[String]) {
     }
     let queue: usize = arg(args, "--queue").and_then(|q| q.parse().ok()).unwrap_or(256);
     let workers: usize = arg(args, "--workers").and_then(|q| q.parse().ok()).unwrap_or(4).clamp(1, 64);
-    let store = Store::open(&store_dir, &station_id, key, trust).unwrap_or_else(|e| {
+    let mut store = Store::open(&store_dir, &station_id, key, trust).unwrap_or_else(|e| {
         eprintln!("cannot open store: {e}");
         std::process::exit(1)
     });
+    if let Some(q) = arg(args, "--max-store-bytes") {
+        match q.parse::<u64>() {
+            Ok(b) => store.set_quota(Some(b)),
+            Err(_) => {
+                eprintln!("--max-store-bytes must be a number of bytes");
+                std::process::exit(2)
+            }
+        }
+    }
     for n in &store.recovery_notes {
         eprintln!("recovery: {n}");
     }

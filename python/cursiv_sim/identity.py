@@ -41,6 +41,11 @@ class Identity:
         return cls(Ed25519PrivateKey.generate())
 
     @classmethod
+    def from_seed(cls, seed: bytes) -> "Identity":
+        """Deterministic key for SIMULATION ONLY (reproducible missions). Never use for real data."""
+        return cls(Ed25519PrivateKey.from_private_bytes(hashlib.sha256(seed).digest()))
+
+    @classmethod
     def load_or_create(cls, path: Path) -> "Identity":
         path = Path(path)
         if path.exists():
@@ -59,7 +64,7 @@ class Identity:
         seed = self._key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
                                        serialization.NoEncryption())
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")   # never collides with a crashed writer's leftover
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"format": "cursiv-robotics-key-1", "key_id": self.key_id,

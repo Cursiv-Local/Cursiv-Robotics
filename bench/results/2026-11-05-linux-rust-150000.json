@@ -1,0 +1,30 @@
+{
+  "export_s": 0.761937993,
+  "ingest_batch100_ms": {
+    "max": 11.504535,
+    "p50": 6.179886,
+    "p95": 6.947865999999999,
+    "p99": 8.372042
+  },
+  "ingest_records_per_s": 15675.0,
+  "measured_on": "linux x86_64 (software benchmark on this computer, not robot hardware)",
+  "package_bytes": 298957165,
+  "peak_rss_mib": 803.8,
+  "records": 150000,
+  "reopen_s": 1.556822618,
+  "robots": 3,
+  "schema": "cursiv-bench-rust-1",
+  "science_flags": {
+    "agreement_check_truncated": 1,
+    "clock_drift": 3
+  },
+  "science_s": 1.3284213440000001,
+  "sign_records_per_s": 46449.0,
+  "verify_records_per_s": 17047.0,
+  "verify_s": 8.799279495,
+  "standalone_cursiv_verify": {
+    "exit_code": 1,
+    "wall_s": 8.598,
+    "peak_rss_mib": 486.3
+  }
+}

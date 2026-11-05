@@ -1,0 +1,11 @@
+# Evidence is bytes. Signed and hashed files must reach every computer exactly as they were
+# signed: never let git convert line endings (Windows checkouts would otherwise turn LF into
+# CRLF and every signature and hash would fail).
+* text=auto eol=lf
+crates/cursiv-evidence/tests/fixtures/** -text
+examples/sample-package/** -text
+*.json -text
+*.jsonl -text
+*.pdf binary
+*.png binary
+*.ps1 text eol=crlf

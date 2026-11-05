@@ -1,0 +1,41 @@
+{
+  "mission_id": "drone-survey-1",
+  "seed": 99,
+  "start_utc": "2026-07-15T14:00:00Z",
+  "duration_s": 1200,
+  "tick_s": 5,
+  "description": "A 20-minute aerial survey line with a lossy radio link and corrupted image uploads.",
+  "platforms": [
+    {
+      "robot_id": "drone-02",
+      "kind": "aerial",
+      "start": [
+        45.2,
+        -123.9
+      ],
+      "interval_s": 10,
+      "sync_every_s": 10,
+      "altitude_m": 120,
+      "flight_s": 1100,
+      "speed_mps": 10,
+      "sensors": [
+        "altitude",
+        "air_temperature",
+        "relative_humidity",
+        "image"
+      ]
+    }
+  ],
+  "faults": [
+    {
+      "kind": "packet_loss",
+      "robot": "drone-02",
+      "probability": 0.4
+    },
+    {
+      "kind": "corrupt_upload",
+      "robot": "drone-02",
+      "probability": 0.5
+    }
+  ]
+}
