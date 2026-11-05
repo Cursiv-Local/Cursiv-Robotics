@@ -75,6 +75,8 @@ pub struct Flag {
     pub message: String,
     pub robot_id: String,
     pub observation_ids: Vec<String>,
+    /// Groups related flags (for contradictions: the observation type and the two sensors).
+    pub group: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,7 +111,7 @@ fn standard_u(m: &crate::model::Measurement) -> Option<f64> {
 pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Profile) -> ScienceReport {
     let mut flags = Vec::new();
     let mut flag = |code: &str, epi: &str, msg: String, robot: &str, ids: Vec<String>| {
-        flags.push(Flag { code: code.into(), epistemic: epi.into(), message: msg, robot_id: robot.into(), observation_ids: ids });
+        flags.push(Flag { code: code.into(), epistemic: epi.into(), message: msg, robot_id: robot.into(), observation_ids: ids, group: String::new() });
     };
     let received: HashMap<(String, u64), f64> = receipts.iter()
         .filter_map(|r| Some(((r.robot_id.clone(), r.robot_seq), parse_utc(&r.received_time)?))).collect();
@@ -207,6 +209,7 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
         by_type.entry(r.observation.observation_type.as_str()).or_default().push(r);
     }
     let mut unassessable = 0usize;
+    let mut contradictions: Vec<Flag> = Vec::new();
     for (ty, mut rs) in by_type {
         let Some(p) = profile.types.get(ty) else { continue };
         let (Some(radius), Some(window)) = (p.compare_radius_m, p.compare_window_s) else { continue };
@@ -239,10 +242,14 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
                     (Some(ua), Some(ub)) => {
                         let combined = (ua * ua + ub * ub).sqrt();
                         if diff > profile.contradiction_sigma * combined {
-                            flag("contradiction", "known", format!(
+                            let mut pair = [a.sensor.sensor_id.clone(), b.sensor.sensor_id.clone()];
+                            pair.sort();
+                            contradictions.push(Flag { code: "contradiction".into(), epistemic: "known".into(),
+                                message: format!(
                                 "{ty}: {} ({}) and {} ({}) differ by {diff:.3} {}, more than {} combined standard uncertainties ({:.3}), {d:.0} m and {:.0} s apart. Which (if either) is correct is not determined.",
                                 a.observation_id, a.robot_id, b.observation_id, b.robot_id, ma.unit, profile.contradiction_sigma, combined, (tb - ta)),
-                                &a.robot_id, vec![a.observation_id.clone(), b.observation_id.clone()]);
+                                robot_id: a.robot_id.clone(), observation_ids: vec![a.observation_id.clone(), b.observation_id.clone()],
+                                group: format!("{ty}: {} vs {}", pair[0], pair[1]) });
                         }
                     }
                     _ => unassessable += 1,
@@ -250,10 +257,11 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
             }
         }
     }
+    flags.extend(contradictions);
     if unassessable > 0 {
         flags.push(Flag { code: "agreement_unassessable".into(), epistemic: "unknown".into(),
             message: format!("{unassessable} nearby pair(s) could not be compared because an uncertainty was not recorded"),
-            robot_id: String::new(), observation_ids: vec![] });
+            robot_id: String::new(), observation_ids: vec![], group: String::new() });
     }
     let mut counts = BTreeMap::new();
     for f in &flags {
