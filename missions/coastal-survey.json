@@ -1,0 +1,142 @@
+{
+  "mission_id": "coastal-survey-1",
+  "seed": 20261105,
+  "start_utc": "2026-06-01T08:00:00Z",
+  "duration_s": 3600,
+  "tick_s": 10,
+  "description": "A one-hour simulated coastal survey: a moored buoy, an underwater vehicle that can only report when it surfaces, a survey drone and a shore rover, with every fault class injected.",
+  "platforms": [
+    {
+      "robot_id": "buoy-01",
+      "kind": "stationary",
+      "start": [
+        45.1,
+        -124.05
+      ],
+      "interval_s": 60,
+      "sync_every_s": 60,
+      "sensors": [
+        "water_temperature",
+        "conductivity",
+        "dissolved_oxygen",
+        "air_pressure"
+      ]
+    },
+    {
+      "robot_id": "auv-01",
+      "kind": "underwater",
+      "start": [
+        45.101,
+        -124.06
+      ],
+      "interval_s": 30,
+      "sync_every_s": 30,
+      "heading_deg": 90,
+      "speed_mps": 1.2,
+      "surface_every_s": 900,
+      "surface_for_s": 120,
+      "max_depth_m": 40,
+      "sensors": [
+        "depth",
+        "water_temperature",
+        "salinity"
+      ]
+    },
+    {
+      "robot_id": "drone-01",
+      "kind": "aerial",
+      "start": [
+        45.105,
+        -124.04
+      ],
+      "interval_s": 20,
+      "sync_every_s": 20,
+      "altitude_m": 80,
+      "flight_s": 1500,
+      "speed_mps": 6,
+      "sensors": [
+        "altitude",
+        "air_temperature",
+        "relative_humidity",
+        "image"
+      ]
+    },
+    {
+      "robot_id": "rover-01",
+      "kind": "ground",
+      "start": [
+        45.103,
+        -124.03
+      ],
+      "interval_s": 60,
+      "sync_every_s": 120,
+      "heading_deg": 30,
+      "speed_mps": 0.4,
+      "sensors": [
+        "soil_moisture",
+        "air_temperature"
+      ]
+    }
+  ],
+  "faults": [
+    {
+      "kind": "sensor_drift",
+      "robot": "buoy-01",
+      "sensor": "water_temperature",
+      "rate_per_h": 2.0,
+      "from_s": 1800
+    },
+    {
+      "kind": "expired_calibration",
+      "robot": "buoy-01",
+      "sensor": "dissolved_oxygen"
+    },
+    {
+      "kind": "sensor_dropout",
+      "robot": "buoy-01",
+      "from_s": 2400,
+      "until_s": 2700
+    },
+    {
+      "kind": "packet_loss",
+      "robot": "drone-01",
+      "probability": 0.25
+    },
+    {
+      "kind": "corrupt_upload",
+      "robot": "drone-01",
+      "probability": 0.3
+    },
+    {
+      "kind": "duplicate_send",
+      "robot": "rover-01",
+      "every": 5
+    },
+    {
+      "kind": "duplicate_reading",
+      "robot": "rover-01",
+      "every": 17
+    },
+    {
+      "kind": "clock_step",
+      "robot": "rover-01",
+      "at_s": 2000,
+      "offset_s": -300
+    },
+    {
+      "kind": "shutdown",
+      "robot": "auv-01",
+      "at_s": 1500
+    },
+    {
+      "kind": "station_crash",
+      "at_s": 3000
+    },
+    {
+      "kind": "storage_exhaustion",
+      "at_s": 1200,
+      "until_s": 1500,
+      "headroom_bytes": 15000
+    }
+  ]
+}

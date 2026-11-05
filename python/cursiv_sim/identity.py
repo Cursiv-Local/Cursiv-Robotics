@@ -41,6 +41,11 @@ class Identity:
         return cls(Ed25519PrivateKey.generate())
 
     @classmethod
+    def from_seed(cls, seed: bytes) -> "Identity":
+        """Deterministic key for SIMULATION ONLY (reproducible missions). Never use for real data."""
+        return cls(Ed25519PrivateKey.from_private_bytes(hashlib.sha256(seed).digest()))
+
+    @classmethod
     def load_or_create(cls, path: Path) -> "Identity":
         path = Path(path)
         if path.exists():

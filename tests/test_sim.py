@@ -197,3 +197,14 @@ def test_bridge_storage_quota_and_live_trust_reload(tmp_path):
     finally:
         proc.terminate()
         proc.wait()
+
+
+@pytest.mark.parametrize("mission", ["buoy-baseline", "drone-survey", "coastal-survey"])
+def test_virtual_missions_reproduce_their_documented_results(tmp_path, mission):
+    from cursiv_sim import missions
+    cfg = json.loads((ROOT / "missions" / f"{mission}.json").read_text())
+    res = missions.Mission(cfg, tmp_path / cfg["mission_id"]).run()
+    expected = json.loads((ROOT / "missions" / f"{mission}.expected.json").read_text())
+    assert missions.check(res, expected) == []
+    report = Path(res["report"]).read_text()
+    assert "SYNTHETIC DATA" in report and "analysis-01/" in report, "every result cites its signed record"

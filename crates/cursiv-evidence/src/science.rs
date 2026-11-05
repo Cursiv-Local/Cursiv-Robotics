@@ -29,6 +29,10 @@ pub struct TypeProfile {
     /// one sensor is flagged as missing observations (scientific completeness, not cryptographic).
     #[serde(default)]
     pub expected_interval_s: Option<f64>,
+    /// Only compare readings within this vertical separation (location alt_m; negative = depth).
+    /// Different depths or heights legitimately differ (thermoclines, lapse rate).
+    #[serde(default)]
+    pub compare_vertical_m: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,7 +69,7 @@ impl Profile {
     pub fn survey_default() -> Self {
         let t = |unit: &str, min: f64, max: f64, r: Option<f64>, w: Option<f64>| TypeProfile {
             unit: unit.into(), min: Some(min), max: Some(max), requires_attachment: false, compare_radius_m: r, compare_window_s: w,
-            expected_interval_s: None,
+            expected_interval_s: None, compare_vertical_m: None,
         };
         let mut types = BTreeMap::new();
         types.insert("soil_moisture".into(), t("%", 0.0, 100.0, Some(25.0), Some(3600.0)));
@@ -74,7 +78,7 @@ impl Profile {
         types.insert("air_temperature".into(), t("degC", -90.0, 60.0, Some(200.0), Some(600.0)));
         types.insert("relative_humidity".into(), t("%", 0.0, 100.0, Some(200.0), Some(600.0)));
         types.insert("air_pressure".into(), t("hPa", 300.0, 1100.0, Some(500.0), Some(600.0)));
-        types.insert("image".into(), TypeProfile { unit: "".into(), min: None, max: None, requires_attachment: true, compare_radius_m: None, compare_window_s: None, expected_interval_s: None });
+        types.insert("image".into(), TypeProfile { unit: "".into(), min: None, max: None, requires_attachment: true, compare_radius_m: None, compare_window_s: None, expected_interval_s: None, compare_vertical_m: None });
         Profile { name: "survey-default-1".into(), types,
                   region: Some(Region { min_lat: 44.9, max_lat: 45.3, min_lon: -122.6, max_lon: -122.0 }),
                   max_clock_offset_s: 120.0, contradiction_sigma: 3.0, check_clock_against_receipts: true }
@@ -307,6 +311,11 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
                     continue;
                 }
                 let (la, lb) = (a.location.as_ref().unwrap(), b.location.as_ref().unwrap());
+                if let (Some(v), Some(za), Some(zb)) = (p.compare_vertical_m, la.alt_m, lb.alt_m) {
+                    if (za - zb).abs() > v {
+                        continue; // different depths or heights: not expected to agree
+                    }
+                }
                 let d = haversine_m((la.lat, la.lon), (lb.lat, lb.lon));
                 if d > radius {
                     continue;

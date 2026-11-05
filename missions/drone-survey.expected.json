@@ -1,0 +1,38 @@
+{
+  "verdicts": {
+    "attachments": "pass",
+    "authenticity": "pass",
+    "completeness": "pass",
+    "integrity": "pass",
+    "structure": "pass"
+  },
+  "records": {
+    "analysis-01": 3,
+    "drone-02": 484
+  },
+  "heads": {
+    "drone-02": "4b31c3a04a0992a227935c9d10e83d5779831f0d18d5bf3f21f487bb4067d69a"
+  },
+  "derivations": {
+    "inputs_missing": 0,
+    "mismatch": 0,
+    "not_reproducible": 0,
+    "uncertainty_verified": 3,
+    "verified": 3
+  },
+  "counters": {
+    "duplicate_sends": 0,
+    "duplicates_acknowledged": 0,
+    "corrupt_uploads_rejected": 63,
+    "packet_losses": 48,
+    "station_full_refusals": 0,
+    "robot_restarts": 0,
+    "station_crashes": 0
+  },
+  "science_absent": [
+    "out_of_range",
+    "contradiction",
+    "duplicate_content"
+  ],
+  "_meaning": "Lossy link and corrupted uploads: every record and image still arrives intact; corrupted uploads are rejected and retried."
+}

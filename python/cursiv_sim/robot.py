@@ -148,9 +148,11 @@ class RobotAgent:
         o["provenance"]["source"] = "interpretation"
         return self.record(o)
 
-    def record(self, observation: dict) -> dict:
+    def record(self, observation: dict, written_time: str | None = None) -> dict:
+        """Sign and persist a record. `written_time` defaults to this computer's clock; simulations
+        pass their mission clock so runs are reproducible."""
         rec = {"schema": "cursiv-record-1", "robot_id": self.robot_id, "seq": len(self.envelopes) + 1,
-               "prev": self.hashes[-1] if self.hashes else "genesis", "written_time": utc(datetime.now(timezone.utc)),
+               "prev": self.hashes[-1] if self.hashes else "genesis", "written_time": written_time or utc(datetime.now(timezone.utc)),
                "observation": observation}
         env = self.identity.sign(rec, RECORD_TYPE)
         self._persist(env)
@@ -196,6 +198,9 @@ class RobotAgent:
                     self.link_up = False
                     raise LinkDown("link dropped during transfer")
                 status, data, _ = self.client.submit(chunk)
+                if status == 507:
+                    # the station is full: nothing from this chunk was stored; keep it and retry later
+                    return {"sent": sent, "link": "station_full", "pending": len(self.envelopes) - i}
                 for r in data.get("results", [data]):
                     results[r.get("status") or r.get("code", "?")] = results.get(r.get("status") or r.get("code", "?"), 0) + 1
                     if r.get("status") == "rejected":

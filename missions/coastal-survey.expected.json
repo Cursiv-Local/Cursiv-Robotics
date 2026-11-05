@@ -1,0 +1,50 @@
+{
+  "verdicts": {
+    "attachments": "pass",
+    "authenticity": "pass",
+    "completeness": "pass",
+    "integrity": "pass",
+    "structure": "pass"
+  },
+  "records": {
+    "analysis-01": 12,
+    "auv-01": 363,
+    "buoy-01": 224,
+    "drone-01": 715,
+    "rover-01": 129
+  },
+  "heads": {
+    "auv-01": "6c81d2b827def15611ee0b969f5645d6c90c0ea38e813b1aef2799737319f218",
+    "buoy-01": "9d92d670f194970b55a64082ead536954aa930e953a62a9aade6aa22597b53fa",
+    "drone-01": "f19995fce630f5682d594bd076f9f0f413cd70aee6e7bfc16fad002ad599f96e",
+    "rover-01": "3d838af3d5117723086796909f6b983d9c05b07eeec17ef17772789826a502b1"
+  },
+  "derivations": {
+    "inputs_missing": 0,
+    "mismatch": 0,
+    "not_reproducible": 0,
+    "uncertainty_verified": 12,
+    "verified": 12
+  },
+  "counters": {
+    "duplicate_sends": 6,
+    "duplicates_acknowledged": 6,
+    "corrupt_uploads_rejected": 50,
+    "packet_losses": 53,
+    "station_full_refusals": 20,
+    "robot_restarts": 1,
+    "station_crashes": 1
+  },
+  "science_at_least": {
+    "calibration_expired": 1,
+    "sampling_gap": 1,
+    "duplicate_content": 1,
+    "out_of_order_time": 1,
+    "contradiction": 1
+  },
+  "science_absent": [
+    "out_of_range",
+    "unit_mismatch"
+  ],
+  "_meaning": "Each injected fault is detected: expired DO calibration, the buoy dropout (sampling_gap), rover duplicate readings, the -300 s rover clock step (out_of_order_time), and the buoy temperature drift (contradiction with the AUV's surface readings). Operational faults (packet loss, corrupted uploads, storage exhaustion, AUV restart, station crash, duplicate sends) leave every cryptographic verdict passing with no record lost."
+}
