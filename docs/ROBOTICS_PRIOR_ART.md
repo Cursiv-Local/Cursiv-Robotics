@@ -51,6 +51,12 @@ No surveyed open-source project combines:
 2. a dependency-light independent verifier with separate integrity, authenticity, completeness and attachment verdicts;
 3. evidence packages valid under both BagIt and a signed manifest;
 4. a strict separation of cryptographic verification from deterministic scientific QC (QARTOD);
-5. mandatory synthetic-data labelling.
+5. mandatory synthetic-data labelling that propagates to everything derived from it;
+6. **re-computation of derived results by the verifier** (a validly signed wrong number is caught);
+7. **signed, evidence-linked findings** with epistemic labels, citation checks, caveat propagation through
+   derivations, and a rule that an AI model is never the authority for a "known" statement.
+
+Black-box recorders (above) answer "what did the machine do?". Items 6 and 7 answer "does this
+scientific result follow from the recorded evidence?", which none of the surveyed projects attempts.
 
 Each of these individually uses existing standards (DSSE, BagIt, RFC 6962 Merkle trees, QARTOD, MCAP).

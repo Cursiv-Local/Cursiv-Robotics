@@ -57,6 +57,26 @@ Standards adopted instead of inventing formats: see `docs/ROBOTICS_PRIOR_ART.md`
 | Scientific plausibility | `science.rs`: ranges, units, calibration, time, region, cross-sensor agreement | Can show inconsistency; **cannot** show correctness |
 | Sensor reliability | Not assessed | Calibration metadata is reported, never assumed |
 
+## Reproducibility and reasoning layer (`reasoning.rs`)
+
+Above integrity, authenticity and plausibility sits a fourth layer that black-box recorders do not have:
+
+- **Derived results** state their method (`processing` step `cursiv.derive`, `{op, params}`) and ordered inputs
+  (`provenance.derived_from`, as `robot/observation_id`). The verifier recomputes them with the same deterministic
+  operations: inputs summed in cited order, IEEE 754 doubles, relative tolerance 1e-9 for cross-language agreement. The
+  result is one of verified, mismatch, not reproducible (no method, or an unknown operation) or inputs missing. A
+  result derived from records written later by the same robot is a causality error.
+- **Findings** are observations of type `finding` carrying a `claim`: the statement, its epistemic label, who made it
+  (`human`, `ai_model` with its exact model id, or `software`), the observations it rests on and those against it,
+  and its assumptions. They are signed and append-only like everything else.
+- Checks: citations must exist and resolve uniquely; citing a value that was later corrected is a caveat; `known` and
+  `inferred` need supporting evidence; **an AI model can never be the authority for `known`**; caveats from the science
+  checks propagate through derivations, so a mean of contradictory readings stays caveated; anything about synthetic
+  data must be synthetic.
+- Status per finding: well supported, supported with caveats, unsupported, or invalid. "Well supported" means
+  consistent with cited evidence, never "true".
+- `cursiv-verify` exits 3 when records verify but a derived result or finding is invalid.
+
 ## Ordering and synchronization
 
 - No global clock order is assumed. Order is **per robot** (`seq`, `prev`). The station's receipt chain adds an arrival order that is the station's own claim.

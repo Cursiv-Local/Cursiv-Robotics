@@ -51,7 +51,8 @@ real deployments need thresholds from the instrument and the relevant QARTOD man
 | 7–8 | A copy has one temperature edited; verification fails integrity (`record_signature`, `chain`, `file_changed`, `checkpoint_mismatch`) | `runs/demo/tampered/` |
 | 9 | rover-01's link goes down; it keeps recording to its outbox; its first reconnect drops mid-transfer. rover-03's thermometer is biased by +4 °C (a *sensor* fault) | console |
 | 10 | Reconnect: sync resumes from the bridge's head; nothing lost or duplicated | console |
-| 11 | Final package and `runs/demo/evidence-report.md`: verification passes; science flags the rover-02/rover-03 thermometer disagreement **without deciding which is right** | the report |
+| 11 | rover-02 and rover-03 derive mean air temperatures on board (and rover-02 a kelvin conversion); a human analyst and an AI assistant (exact model named) record findings citing them | console |
+| 12 | Final package and `runs/demo/evidence-report.md`: the verifier recomputes all 3 derived values and marks both findings "supported with caveats", because the means inherit the contradiction flag from their input readings; verification passes; science flags the rover-02/rover-03 thermometer disagreement **without deciding which is right** | the report |
 
 The demo exits 0 only if the clean package passes, the edited one fails, and the contradiction is flagged.
 
@@ -80,8 +81,14 @@ co-located readings agree unless a fault is injected. Images are generated PNGs 
 | 13 | Partial sync | transfer dropped after 20 records | bridge partial; resume completes |
 | 14 | Unexpected restart | robot rebuilt from disk; robot with lost state; station `kill -9` mid-burst | resumes; fork refused (`equivocation`); store recovers |
 | 15 | High-volume burst | 10 robots × 2,000 records, queue of 4 | 503 backpressure + retries; all 20,000 stored |
+| 16 | Validly signed but wrong derived result | a robot signs a mean that is off by 0.7 | integrity passes; recomputation reports a mismatch; exit 3 |
+| 17 | Over-claimed findings | an AI model claims "known"; a finding cites nothing | both invalid; a cited, supported finding stays well supported |
 
 ## Writing your own agent
+
+`agent.derive("mean", input_envelopes)` records a derived result the verifier can recompute, and
+`agent.finding(statement, epistemic=..., author_kind=..., model=..., supports=[...])` records an interpretation.
+
 
 Use `RobotAgent` (`python/cursiv_sim/robot.py`): `observation(...)` builds a record with explicit
 unknowns, `record()` signs and fsyncs it, `upload()` sends attachments, `sync()` delivers from the

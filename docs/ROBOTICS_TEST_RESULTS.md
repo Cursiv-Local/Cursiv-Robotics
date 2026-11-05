@@ -18,13 +18,13 @@ Windows and macOS were **not** tested in this iteration.
 
 | Suite | Command | Result |
 |---|---|---|
-| Rust unit tests (incl. DSSE PAE spec example) | `cargo test --release` | 5 passed |
-| Rust evidence and fault tests (`crates/cursiv-evidence/tests/faults.rs`) | `cargo test --release` | 16 passed |
+| Rust unit tests (incl. DSSE PAE spec example, deterministic derivation ops) | `cargo test --release` | 6 passed |
+| Rust evidence and fault tests (`crates/cursiv-evidence/tests/faults.rs`, incl. wrong derived results and findings rules) | `cargo test --release` | 18 passed |
 | Clippy | `cargo clippy --release` | 0 warnings |
-| Python core (`tests/test_sim.py`: network and input defences, token auth, DSSE PAE, ROS 2 mapping, Rust/Python Merkle agreement, demo, all 15 faults) | `python3 -m pytest tests -q` | 9 passed, 4 interop skipped without optional packages |
+| Python core (`tests/test_sim.py`: network and input defences, token auth, DSSE PAE, ROS 2 mapping, Rust/Python Merkle agreement, demo, all 17 faults) | `python3 -m pytest tests -q` | 9 passed, 4 interop skipped without optional packages |
 | Interoperability (`tests/test_interop.py`, optional packages installed) | `python3 -m pytest tests -q` | 4 passed: bagit-python validates packages and catches tampering; securesystemslib verifies every record and manifest as DSSE; a real ROS 2 CDR MCAP recording is imported, verified and traceable; QARTOD (ioos_qc 3.0.0) flags an implausible value and refuses a tampered package |
-| Fault suite (`python -m cursiv_sim.faults`) | real bridge binary + `cursiv-verify` | **15/15 scenarios passed** |
-| Demo (`python -m cursiv_sim.demo --steps 30`) | 11 steps | passed |
+| Fault suite (`python -m cursiv_sim.faults`) | real bridge binary + `cursiv-verify` | **17/17 scenarios passed** |
+| Demo (`python -m cursiv_sim.demo --steps 30`) | 12 steps | passed: 3/3 derived values recomputed, 2 findings (human and AI) supported with caveats |
 
 Cursiv's own test suite was not run for this work, because the Cursiv repository was not changed (its
 working tree was checked clean before and after).
@@ -48,6 +48,8 @@ working tree was checked clean before and after).
 | 13 | Partial sync | dropped after 20 → bridge 62/90; resumed → 90/90 |
 | 14 | Restart | robot resumed from disk; lost-state fork refused by robot and bridge (409 `equivocation`); after station `kill -9` + restart, 181/181 |
 | 15 | High-volume burst | 10 robots × 2,000 records in 1.61 s (12,395 records/s), 5 backpressure retries, 20,000 stored |
+| 16 | Validly signed but wrong derived result | exit 3; integrity=pass; recomputed: 1 verified, 1 mismatch |
+| 17 | Over-claimed findings | statuses well_supported, invalid, invalid; `ai_claim_marked_known`, `unsupported_claim` |
 
 ## Demo (30 steps)
 

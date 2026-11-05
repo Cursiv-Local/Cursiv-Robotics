@@ -41,6 +41,8 @@ layer: robot motion or safety (out of scope by design).
 | Unsafe deserialisation | Typed `serde` structs only; no code or pickle | design |
 | Prompt injection via metadata | No AI model reads observations in this layer; future AI interpretation must treat metadata as data and cite record ids | design |
 | Synthetic data passed off as real | `synthetic` required, must match `provenance.source`; mixed packages are an error; reports carry a banner | Rust `malformed...`, verifier `mixed_synthetic` |
+| Validly signed but wrong derived values (bug or dishonest firmware) | Verifier recomputes every `cursiv.derive` result; opaque derivations are reported as not reproducible | `a_validly_signed_but_wrong...`, suite 16 |
+| AI or analyst over-claiming | Findings must cite evidence; AI cannot be the authority for `known`; caveats propagate through derivations; citations of corrected values flagged | `findings_are_checked...`, suite 17 |
 | Commanding robots | No endpoint or code path sends commands; the robot reads only acceptance results and head counts | design |
 
 ## Residual risks (not solved here)

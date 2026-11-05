@@ -43,8 +43,21 @@ Record body (`cursiv-record-1`):
    "processing":[],"quality":{"flag":"unassessed","basis":"…"},"correction":null}}
 ```
 
-Rules: unknown values are `null` and never defaulted; `synthetic` must be true exactly when
-`provenance.source` is `simulated`; ids are 1–64 of `[a-z0-9._-]`; times are RFC 3339 UTC with `Z`;
+Derived results add `"provenance": {"source": "derived", "derived_from": ["rover-02/<id>", …]}` and a processing step
+`{"step": "cursiv.derive", "parameters": {"op": "mean|median|min|max|sum|count|stddev|linear|convert", "params": {…}}}`
+(`linear`: `a`, `b`, optional `unit`; `convert`: `to`, one of K/degC/degF, Pa/hPa/kPa, %/1, m/cm).
+
+Findings: `observation_type: "finding"`, `measurement: null`, `provenance.source: "interpretation"` and
+
+```json
+"claim": {"statement": "…", "epistemic": "known|inferred|assumed|unknown", "author_kind": "human|ai_model|software",
+          "model": "<exact model id, required for ai_model>", "supports": ["robot/id", …], "contradicts": […], "assumptions": ["…"]}
+```
+
+Analysts and AI assistants are signers like robots: they have their own key, log and trust-store entry.
+
+Rules: unknown values are `null` and never defaulted; `simulated` observations must be synthetic and `sensor`/`manual` ones must not be;
+derived results and findings must be synthetic when any input is (checked by the verifier); ids are 1–64 of `[a-z0-9._-]`; times are RFC 3339 UTC with `Z`;
 `time_source` ∈ `gnss, ntp, ptp, rtc_synced, rtc_unsynced, monotonic_only, simulated, unknown`;
 uncertainty `kind` ∈ `standard, expanded (with coverage_k), bound`; unknown fields are rejected.
 
@@ -78,7 +91,8 @@ cursiv-verify package <dir> [--trust trust.json] [--json] [--science [--profile 
 cursiv-verify cursiv-export <dir> [--key-id <16 hex>] [--json]      # existing Cursiv notebook exports
 ```
 
-`cursiv-verify` exits 0 only when every verdict passes. Exit 1 means a verdict failed or could not be established; exit 2 is a usage error.
+`cursiv-verify` exits 0 only when every verdict passes. Exit 1 means a verdict failed or could not be established; exit 2 is a usage error;
+exit 3 (with `--science` or `--report-md`) means the records verify but a derived result or finding is invalid.
 
 ## Trust store (`cursiv-trust-1`)
 
