@@ -233,7 +233,7 @@ fn fault_4_duplicates_are_idempotent_or_rejected() {
     let mut l = lab("dup");
     let r = &mut l.robots[0];
     let e1 = r.record(r.obs(1, "air_temperature", 10.0, "2026-11-05T10:00:00Z"));
-    assert!(matches!(l.store.ingest_batch(&[e1.clone()]).unwrap()[0], Outcome::Accepted { .. }));
+    assert!(matches!(l.store.ingest_batch(std::slice::from_ref(&e1)).unwrap()[0], Outcome::Accepted { .. }));
     assert!(matches!(l.store.ingest_batch(&[e1]).unwrap()[0], Outcome::Duplicate { .. }), "retry is idempotent");
     let r = &mut l.robots[0];
     let again = r.obs(1, "air_temperature", 11.0, "2026-11-05T10:01:00Z"); // same observation_id, new content
@@ -642,9 +642,9 @@ fn a_failed_write_stops_the_store_and_restart_recovers_from_disk() {
     let r = &mut l.robots[0];
     let o = r.obs(50, "air_temperature", 1.0, "2026-11-05T10:00:00Z");
     let e = r.record(o);
-    assert!(l.store.ingest_batch(&[e.clone()]).is_err());
+    assert!(l.store.ingest_batch(std::slice::from_ref(&e)).is_err());
     assert!(l.store.failed().is_some());
-    assert!(l.store.ingest_batch(&[e.clone()]).is_err(), "no further writes once memory may be ahead of disk");
+    assert!(l.store.ingest_batch(std::slice::from_ref(&e)).is_err(), "no further writes once memory may be ahead of disk");
     assert!(matches!(l.store.ingest_checkpoint(&l.robots[1].checkpoint()), Outcome::Rejected { ref code, .. } if code == "store_failed"));
     fs::remove_dir(&f).unwrap();
     fs::rename(&aside, &f).unwrap();
@@ -665,7 +665,7 @@ fn concurrent_uploads_of_the_same_attachment_do_not_corrupt_it() {
     }).collect();
     let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert!(results.iter().all(|r| r.is_ok()), "{results:?}");
-    assert_eq!(results.iter().filter(|r| matches!(r, Ok(true))).count() >= 1, true);
+    assert!(results.iter().any(|r| matches!(r, Ok(true))));
     assert_eq!(sha256_hex(&fs::read(l.dir.join("store/blobs/sha256").join(&sha)).unwrap()), sha);
     assert!(fs::read_dir(l.dir.join("store/blobs/tmp")).unwrap().next().is_none());
 }

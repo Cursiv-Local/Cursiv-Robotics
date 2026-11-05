@@ -19,7 +19,7 @@ const CONVERSIONS: &[(&str, &str, f64, f64)] = &[
 ];
 
 /// Units recognised without conversion (dimensionless or used as-is).
-const KNOWN: &[&str] = &["degC", "K", "degF", "hPa", "Pa", "kPa", "%", "1", "m", "cm", "km", "ft", "m/s", "km/h", "mS/cm", "uS/cm",
+pub const KNOWN: &[&str] = &["degC", "K", "degF", "hPa", "Pa", "kPa", "%", "1", "m", "cm", "km", "ft", "m/s", "km/h", "mS/cm", "uS/cm",
                          "mg/L", "ppm", "dbar", "pH", "lx", "uT", "m/s2", "deg", "rad/s", "dB", "Hz", "s", "PSU", "NTU", "W/m2", "V", "A"];
 
 pub fn known(unit: &str) -> bool {

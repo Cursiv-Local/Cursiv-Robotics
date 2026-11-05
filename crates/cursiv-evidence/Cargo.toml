@@ -18,3 +18,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+proptest = { version = "1", default-features = false, features = ["std"] }
