@@ -126,7 +126,7 @@ fn render_markdown(r: &verify::Report, s: &science::ScienceReport) -> String {
         md += &format!("| {k} | {n} |\n");
     }
     md += "\n### Flags that need a scientist's attention\n\nEpistemic labels: **known** (follows from the recorded values), **inferred** (drawn from several records), **assumed** (rests on the stated assumption), **unknown** (not recorded).\n\n";
-    let notable = ["contradiction", "out_of_range", "clock_drift", "out_of_order_time", "calibration_expired",
+    let notable = ["contradiction", "agreement_check_truncated", "out_of_range", "clock_drift", "out_of_order_time", "calibration_expired",
                    "missing_supporting_evidence", "outside_mission_region", "sensor_time_in_future", "unit_mismatch"];
     let mut any = false;
     let mut groups: std::collections::BTreeMap<&str, Vec<&science::Flag>> = std::collections::BTreeMap::new();
@@ -135,7 +135,7 @@ fn render_markdown(r: &verify::Report, s: &science::ScienceReport) -> String {
     }
     for (g, fs) in &groups {
         any = true;
-        md += &format!("- *known* `contradiction` **{g}**: {} disagreeing pair(s) beyond the agreement threshold. Which sensor (if either) is right is not determined. Example: {}\n",
+        md += &format!("- *known* `contradiction` **{g}**: disagreeing pairs beyond the agreement threshold ({} listed; see the total under Check counts). Which sensor (if either) is right is not determined. Example: {}\n",
                        fs.len(), fs[0].message);
     }
     for f in s.flags.iter().filter(|f| f.code != "contradiction" && notable.contains(&f.code.as_str())).take(100) {

@@ -108,6 +108,9 @@ fn standard_u(m: &crate::model::Measurement) -> Option<f64> {
     })
 }
 
+pub const MAX_PAIR_CHECKS: usize = 2_000_000;
+pub const MAX_FLAGS_PER_GROUP: usize = 50;
+
 pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Profile) -> ScienceReport {
     let mut flags = Vec::new();
     let mut flag = |code: &str, epi: &str, msg: String, robot: &str, ids: Vec<String>| {
@@ -210,6 +213,11 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
     }
     let mut unassessable = 0usize;
     let mut contradictions: Vec<Flag> = Vec::new();
+    // Bounded work and output: a dense or hostile package cannot exhaust time or memory.
+    let mut checks = 0usize;
+    let mut truncated = false;
+    let mut per_group: HashMap<String, usize> = HashMap::new();
+    let mut contradiction_total = 0usize;
     for (ty, mut rs) in by_type {
         let Some(p) = profile.types.get(ty) else { continue };
         let (Some(radius), Some(window)) = (p.compare_radius_m, p.compare_window_s) else { continue };
@@ -219,7 +227,15 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
         for i in 0..rs.len() {
             let a = &rs[i].observation;
             let ta = parse_utc(a.sensor_time.as_deref().unwrap()).unwrap();
+            if truncated {
+                break;
+            }
             for b_rec in rs.iter().skip(i + 1) {
+                checks += 1;
+                if checks > MAX_PAIR_CHECKS {
+                    truncated = true;
+                    break;
+                }
                 let b = &b_rec.observation;
                 let tb = parse_utc(b.sensor_time.as_deref().unwrap()).unwrap();
                 if tb - ta > window {
@@ -244,12 +260,19 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
                         if diff > profile.contradiction_sigma * combined {
                             let mut pair = [a.sensor.sensor_id.clone(), b.sensor.sensor_id.clone()];
                             pair.sort();
+                            let group = format!("{ty}: {} vs {}", pair[0], pair[1]);
+                            contradiction_total += 1;
+                            let seen = per_group.entry(group.clone()).or_default();
+                            *seen += 1;
+                            if *seen > MAX_FLAGS_PER_GROUP {
+                                continue;
+                            }
                             contradictions.push(Flag { code: "contradiction".into(), epistemic: "known".into(),
                                 message: format!(
                                 "{ty}: {} ({}) and {} ({}) differ by {diff:.3} {}, more than {} combined standard uncertainties ({:.3}), {d:.0} m and {:.0} s apart. Which (if either) is correct is not determined.",
                                 a.observation_id, a.robot_id, b.observation_id, b.robot_id, ma.unit, profile.contradiction_sigma, combined, (tb - ta)),
                                 robot_id: a.robot_id.clone(), observation_ids: vec![a.observation_id.clone(), b.observation_id.clone()],
-                                group: format!("{ty}: {} vs {}", pair[0], pair[1]) });
+                                group });
                         }
                     }
                     _ => unassessable += 1,
@@ -258,6 +281,11 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
         }
     }
     flags.extend(contradictions);
+    if truncated {
+        flags.push(Flag { code: "agreement_check_truncated".into(), epistemic: "unknown".into(),
+            message: format!("cross-sensor agreement stopped after {MAX_PAIR_CHECKS} comparisons; later pairs were not checked"),
+            robot_id: String::new(), observation_ids: vec![], group: String::new() });
+    }
     if unassessable > 0 {
         flags.push(Flag { code: "agreement_unassessable".into(), epistemic: "unknown".into(),
             message: format!("{unassessable} nearby pair(s) could not be compared because an uncertainty was not recorded"),
@@ -266,6 +294,10 @@ pub fn validate(records: &[(Record, String)], receipts: &[Receipt], profile: &Pr
     let mut counts = BTreeMap::new();
     for f in &flags {
         *counts.entry(f.code.clone()).or_insert(0) += 1;
+    }
+    if contradiction_total > 0 {
+        // every disagreeing pair is counted; only the first few per sensor pair are listed
+        counts.insert("contradiction".into(), contradiction_total);
     }
     ScienceReport {
         schema: "cursiv-science-report-1".into(),

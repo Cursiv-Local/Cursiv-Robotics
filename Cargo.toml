@@ -5,6 +5,7 @@ members = ["crates/cursiv-evidence", "crates/cursiv-bridge", "crates/cursiv-veri
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 license = "MIT"
 authors = ["Joshua Winkler"]
 repository = "https://github.com/Cursiv-Local/Cursiv-Robotics"

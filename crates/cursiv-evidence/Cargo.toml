@@ -3,6 +3,7 @@ name = "cursiv-evidence"
 description = "Cursiv Robotics evidence core: observation model, signed append-only logs, content-addressed attachments, packages and verification"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 

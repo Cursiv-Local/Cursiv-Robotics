@@ -470,3 +470,24 @@ fn legacy_cursiv_notebook_export_verifies_and_tampering_is_detected() {
     let r = legacy::verify_cursiv_export(&copy, None);
     assert!(r.problems.iter().any(|p| p.contains("observations.csv was changed")), "{:?}", r.problems);
 }
+
+#[test]
+fn dense_or_hostile_packages_cannot_explode_the_agreement_check() {
+    // Found by the benchmark: 3 agents x 3000 co-located readings produced 13.9 million
+    // contradiction flags and the verifier was killed for memory. Work and output are bounded.
+    let mut a = Robot::new("rover-01", 1);
+    let mut b = Robot::new("rover-02", 2);
+    let mut records = vec![];
+    for k in 0..2500u64 {
+        for (r, v) in [(&mut a, 10.0), (&mut b, 20.0)] {
+            let e = r.record(r.obs(k + 1, "air_temperature", v, "2026-11-05T10:00:00Z"));
+            records.push((serde_json::from_str::<Record>(&e.payload).unwrap(), e.payload_hash()));
+        }
+    }
+    let t = std::time::Instant::now();
+    let s = science::validate(&records, &[], &Profile::survey_default());
+    assert!(t.elapsed().as_secs() < 30);
+    assert!(s.counts["contradiction"] > 1_000_000, "every disagreeing pair is still counted: {:?}", s.counts);
+    assert!(s.flags.iter().filter(|f| f.code == "contradiction").count() <= science::MAX_FLAGS_PER_GROUP);
+    assert!(s.counts.contains_key("agreement_check_truncated"));
+}
