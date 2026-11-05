@@ -1,0 +1,13 @@
+[package]
+name = "cursiv-bridge"
+description = "Headless loopback HTTP service that ingests robot observations into a Cursiv evidence store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cursiv-evidence = { path = "../cursiv-evidence" }
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
