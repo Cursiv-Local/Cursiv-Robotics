@@ -30,6 +30,30 @@ desktop has not been tested directly; Windows Server CI is the closest check ava
 | Interoperability (`tests/test_interop.py`, optional packages installed; earlier run on this branch's base) | `python3 -m pytest tests -q` | 4 passed |
 | One-command demo | `python python/cursiv_demo` | DEMO PASSED: expected results identical, tampering detected (5 error codes), tampered copy refused at import, source unchanged |
 
+## Interoperability and scalability upgrade (2026-11-05, branch claude/interop-scalability)
+
+| Suite | Result |
+|---|---|
+| Rust (`cargo test --release`): unit 8, faults 25, segments 7, API and converters 3, properties 11, doc test 1 | 55 passed, 0 failed; also on Rust 1.82 |
+| `tests/segments.rs` | missing, reordered, duplicated, tampered, truncated, unsealed and swapped-seal segments all fail verification in both memory modes; standalone segment checks; format-1 packages and the committed sample still verify; store migration keeps bytes; rotation survives restarts and interrupted seal writes; read failures and unsupported versions never give "verified" |
+| `tests/test_ros2.py` (live ROS 2 Jazzy, simulated publishers in another process) | passed: 5 topics; on every topic published = received + before_capture + lost (lost 0); recorded = received; 75 Temperature values equal their raw CDR; package verified; exported MCAP decodes with mcap-ros2-support without ROS |
+| `tests/test_ros2_core.py`, `tests/test_mcap.py`, `tests/test_api.py` | 6 + 2 + 5 passed (backpressure and accounting, offline-first sync, MCAP round trip incl. a JSON channel, PROV parsed by the `prov` library) |
+| `scripts/ros2_quickstart.sh` | passed: 1,066 records, every verdict pass |
+| All Python (`pytest tests`) | 44 passed, 1 skipped (`ioos_qc`) |
+
+Streaming verification benchmark (format 2, 3 robots, about 2 KB per record):
+
+| Package | Records | Verify (s) | MB/s | Peak RSS streaming (MiB) | Peak RSS with records kept (MiB) |
+|---|---|---|---|---|---|
+| 0.1 GB | 50,199 | 2.74 | 36.5 | 28.8 | 142.1 |
+| 1.0 GB | 502,008 | 27.23 | 36.8 | 50.1 | 1,484.3 |
+| 2.0 GB | 1,004,016 | 53.26 | 37.7 | 96.4 | not run |
+| 5.0 GB | 2,510,040 | 131.71 | 38.1 | 194.3 | not run |
+
+Raw data: `bench/results/2026-11-05-linux-scale-streaming.json`. Linux cloud container, 4 vCPUs. This is software
+on that computer, not robot hardware. The earlier format-1 verifier kept every record, about 3.3 KiB per record:
+486 MiB for 150,000 records.
+
 ## Windows (GitHub Actions, `windows-latest`, Python 3.12.10)
 
 | Check | Result |

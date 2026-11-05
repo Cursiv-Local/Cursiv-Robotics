@@ -59,6 +59,17 @@ layer: robot motion or safety (out of scope by design).
 | Tampered or untrusted package enters a research workspace | Importer verifies first, re-verifies the copy, fingerprints the source before and after, quarantines on request | `tests/test_integration.py` |
 | Malformed input crashes the verifier | Property tests and seeded mutation fuzzing | `properties.rs` |
 
+## Controls added in the interoperability and scalability upgrade
+
+| Threat | Control | Test |
+|---|---|---|
+| Segments removed, reordered, duplicated, substituted or truncated | Station-signed seals chained by `prev_seal`, with record range, file hash and Merkle roots | `tests/segments.rs` |
+| A verifier that runs out of memory or meets a read error reports "verified" anyway | Streaming verification; read errors are structure failures; status is `verified` only when every verdict passes | `tests/segments.rs::read_failures_and_unsupported_formats_never_produce_a_verified_report` |
+| Science run on part of a huge package reads as complete | Records kept only up to `--max-records`; above it science is `not_assessed` | `tests/segments.rs` (capped collection) |
+| Evidence capture slows or blocks a robot's control loop | Read-only node, best-effort QoS, non-blocking bounded queue, separate worker thread | `tests/test_ros2_core.py`, `tests/test_ros2.py` |
+| Silent message loss during capture | Signed `capture_accounting` records (queue drops, size drops, upstream gaps, before-capture) | `tests/test_ros2.py` (every published message accounted for) |
+| Conversions taken as evidence | Converters and MCAP export refuse unverified packages and state that their output is a view | `tests/test_api.py`, `tests/test_mcap.py` |
+
 ## Residual risks (not solved here)
 
 - **Key custody**: robot and station keys are files with 0600 permissions on Linux/macOS (on Windows they inherit the folder's ACL), not hardware-backed (TPM/HSM/secure element). A stolen robot key can sign false but "authentic" records until it is revoked.

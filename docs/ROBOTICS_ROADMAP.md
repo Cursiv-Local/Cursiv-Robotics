@@ -7,6 +7,8 @@ Documented, not implemented. The order reflects what real deployments need first
 - Real data without hardware: phone recordings (phyphox) to signed evidence and a research dossier for Cursiv (`docs/PHONE_GUIDE.md`). Format fixtures follow phyphox's exporter; a real export from the owner's phone is the next validation.
 - Pre-hardware hardening (2026-11-05, `docs/AUDIT_2026-11-05.md`): storage quota, fail-stop, atomic export, live trust reload, units and GUM uncertainty propagation, duplicate/gap/timestamp checks, deterministic virtual missions (stationary, ground, underwater, aerial, multi-robot), Cursiv package contract v1 with a reference importer, property and mutation fuzz tests, Rust benchmark, CI on Linux and Windows with `cargo audit` and Rust 1.82.
 
+- Interoperability and scalability (2026-11-05): segmented logs with seals and streaming verification (5 GB at 194 MiB), store migration, ROS 2 capture node (Jazzy, simulated publishers), MCAP import/export, PROV-JSON and SensorThings converters, stable Rust and Python APIs v1.
+
 ## Next milestone (recommended)
 
 **One real sensor, end to end, on Windows and a Raspberry Pi.** For example a USB or I²C temperature or

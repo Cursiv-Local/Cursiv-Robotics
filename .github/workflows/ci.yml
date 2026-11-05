@@ -89,3 +89,7 @@ jobs:
         env:
           CURSIV_ROS_PYTHON: /usr/bin/python3
         run: python3 -m pytest tests/test_ros2.py tests/test_ros2_core.py tests/test_mcap.py -v
+      - name: ROS 2 quick start (scripts/ros2_quickstart.sh)
+        env:
+          CURSIV_ROS_PYTHON: /usr/bin/python3
+        run: bash scripts/ros2_quickstart.sh

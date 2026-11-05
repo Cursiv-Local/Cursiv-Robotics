@@ -56,7 +56,23 @@ def main(argv=None) -> int:
     c.add_argument("--token-file")
     c.add_argument("--state", default="cursiv-capture-state", help="folder for the robot key and outbox")
     c.add_argument("--duration", type=float, help="seconds (default: until Ctrl+C)")
+    me = sub.add_parser("mcap-export", help="write a verified package to MCAP (raw ROS 2 channels, JSON, LocationFix)")
+    me.add_argument("package")
+    me.add_argument("--trust", required=True)
+    me.add_argument("--out", required=True)
+    me.add_argument("--allow-unverified", action="store_true")
     a = ap.parse_args(argv)
+
+    if a.cmd == "mcap-export":
+        import subprocess
+
+        from cursiv_integration.importer import _verify_bin
+
+        from .mcap_io import export_mcap
+        p = subprocess.run([str(_verify_bin()), "package", a.package, "--trust", a.trust, "--json"], capture_output=True, text=True)
+        v = json.loads(p.stdout)["verification"]
+        print(json.dumps(export_mcap(Path(a.package), Path(a.out), verification=v, allow_unverified=a.allow_unverified)))
+        return 0
 
     if a.cmd == "discover":
         from .node import list_topics
@@ -78,6 +94,9 @@ def main(argv=None) -> int:
     out = run(core, [t.name for t in cfg.topics], duration_s=a.duration, reliable=a.reliable,
               on_sync=lambda r: print("sync:", r, flush=True))
     print(json.dumps(out, indent=1, default=str))
+    if out["sync"].get("link") == "rejected":
+        print(f"the station refused the records ({out['sync'].get('code')}): {out['sync'].get('detail')}. "
+              "They are kept in the outbox; fix the cause (e.g. enrol the robot key) and run capture again to send them.", file=sys.stderr)
     return 0 if out["sync"].get("link") == "up" else 1
 
 

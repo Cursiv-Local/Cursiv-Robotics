@@ -210,5 +210,6 @@ class StreamingAgent:
             return {"link": "station_full", "pending": self.count - self.acked}
         for r in data.get("results", [data]):
             if r.get("status") == "rejected":
-                raise RuntimeError(f"{self.robot_id}: record rejected by the station: {r}")
+                # nothing is lost: the record stays in the outbox. Usually the robot key is not enrolled yet.
+                return {"link": "rejected", "code": r.get("code"), "detail": r.get("detail"), "pending": self.count - self.acked}
         return None
