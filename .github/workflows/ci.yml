@@ -33,13 +33,16 @@ jobs:
       - name: Python dependencies
         run: python -m pip install pytest cryptography bagit securesystemslib
       - name: Python tests (simulation lab, virtual missions vs documented results, phone importer, integration, interop)
-        run: python -m pytest tests -q
+        timeout-minutes: 15
+        run: python -m pytest tests -v -o faulthandler_timeout=120
       - name: One-command demo (PowerShell)
         if: runner.os == 'Windows'
+        timeout-minutes: 10
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts\demo.ps1
       - name: One-command demo (sh)
         if: runner.os != 'Windows'
+        timeout-minutes: 10
         run: sh scripts/demo.sh
       - name: Benchmark (software on the CI runner, not robot hardware)
         shell: bash
