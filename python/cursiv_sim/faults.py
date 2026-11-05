@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 import os
 import shutil
 import socket
@@ -88,7 +89,7 @@ def main(argv=None) -> int:
     out = Path(a.out)
     if out.exists():
         shutil.rmtree(out)
-    lab = Lab(out / "main", list(ROVERS))
+    lab = Lab(out / "main", list(ROVERS) + ["analyst-01"])
     lab.enrol()
     lab.start()
     fleet = Fleet(lab)
@@ -346,7 +347,35 @@ def main(argv=None) -> int:
                 f"authenticity={v(r_nt, 'authenticity')}, integrity={v(r_nt, 'integrity')}"), \
             code == 1 and v(r, "authenticity") == "fail" and code_nt == 1 and v(r_nt, "authenticity") == "not_assessed"
 
-    for fn in (s5, s6, s8, s10, s11):
+    @scenario(16, "Validly signed but wrong derived result", "reproducibility")
+    def s16():
+        g = fleet.rovers["rover-02"].agent
+        temps = [e for e in g.envelopes if body_json(e)["observation"]["observation_type"] == "air_temperature"][:6]
+        good = g.derive("mean", temps)
+        wrong = dict(body_json(good)["observation"], observation_id=f"rover-02-{uuid.uuid4().hex[:16]}")
+        wrong["measurement"] = dict(wrong["measurement"], value=wrong["measurement"]["value"] + 0.7)   # e.g. a firmware bug
+        g.record(wrong)
+        g.sync()
+        code, r = lab.verify(lab.export("s16"))
+        d = r["reasoning"]["derivations"]
+        return f"exit {code}; integrity={v(r, 'integrity')}; recomputed: {d}", \
+            code == 3 and v(r, "integrity") == "pass" and d["mismatch"] == 1 and d["verified"] >= 1
+
+    @scenario(17, "Over-claimed or unsupported finding", "reasoning")
+    def s17():
+        g = fleet.rovers["rover-01"].agent
+        an = RobotAgent("analyst-01", lab.robot_state, lab.client, mission_id="fault-suite")
+        an.finding("Soil moisture is highest in the north-east corner.", epistemic="inferred", supports=g.envelopes[:3])
+        an.finding("The soil is contaminated.", epistemic="known", author_kind="ai_model", model="example-model", supports=g.envelopes[:1])
+        an.finding("Rover-01 found water ice.", epistemic="inferred", supports=[])
+        an.sync()
+        code, r = lab.verify(lab.export("s17"))
+        st = [f["status"] for f in r["reasoning"]["findings"] if f["author"] == "analyst-01"]
+        codes = {f["code"] for f in r["reasoning"]["flags"]}
+        return f"finding statuses {st}; flags {sorted(codes & {'ai_claim_marked_known', 'unsupported_claim'})}", \
+            st == ["well_supported", "invalid", "invalid"] and {"ai_claim_marked_known", "unsupported_claim"} <= codes
+
+    for fn in (s5, s6, s8, s10, s11, s16, s17):
         fn()
     lab.stop()
     lab2.stop()

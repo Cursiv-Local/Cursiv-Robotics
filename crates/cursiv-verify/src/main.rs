@@ -3,11 +3,12 @@
 //!   cursiv-verify package <dir> [--trust trust.json] [--json] [--science [--profile p.json]] [--report-md out.md]
 //!   cursiv-verify cursiv-export <dir> [--key-id <id>] [--json]
 //!
-//! Exit status: 0 every verdict passes; 1 a verdict fails or is not established; 2 usage error.
+//! Exit status: 0 every verdict passes; 1 a verdict fails or is not established; 2 usage error;
+//! 3 (with --science/--report-md) verification passes but a derived result or finding is invalid.
 
 use cursiv_evidence::science::{self, Profile};
 use cursiv_evidence::trust::TrustStore;
-use cursiv_evidence::{legacy, verify};
+use cursiv_evidence::{legacy, reasoning, verify};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -50,10 +51,18 @@ fn main() -> ExitCode {
             let report = verify::verify_package(&dir, trust.as_ref());
             let sci = args.iter().any(|a| a == "--science" || a == "--report-md")
                 .then(|| science::validate(&report.records, &report.receipts, &profile));
+            let rsn = sci.as_ref().map(|s| reasoning::analyse(&report.records, Some(s)));
             if json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"verification": report, "science": sci})).unwrap());
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({"verification": report, "science": sci, "reasoning": rsn})).unwrap());
             } else {
                 print!("{}", report.text());
+                if let Some(r) = &rsn {
+                    println!("\nDerived results (recomputed from cited inputs): {:?}", r.derivations);
+                    for f in &r.findings {
+                        println!("  finding {} by {} ({}{}): {} [{}]", f.observation_id, f.author, f.author_kind,
+                                 f.model.as_ref().map(|m| format!(", {m}")).unwrap_or_default(), f.epistemic, f.status);
+                    }
+                }
                 if let Some(s) = &sci {
                     println!("\nScientific validation ({}; separate from integrity, no AI model):", s.profile);
                     for (k, n) in &s.counts {
@@ -62,13 +71,20 @@ fn main() -> ExitCode {
                 }
             }
             if let Some(out) = flag_value(&args, "--report-md") {
-                let md = render_markdown(&report, sci.as_ref().unwrap());
+                let md = render_markdown(&report, sci.as_ref().unwrap(), rsn.as_ref().unwrap());
                 if let Err(e) = std::fs::write(&out, md) {
                     eprintln!("cannot write {out}: {e}");
                     return ExitCode::from(2);
                 }
             }
-            if report.all_pass() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+            let reasoning_errors = rsn.as_ref().is_some_and(|r| r.flags.iter().any(|f| f.severity == "error"));
+            if !report.all_pass() {
+                ExitCode::from(1)
+            } else if reasoning_errors {
+                ExitCode::from(3) // records authentic and complete, but a derived result or finding is invalid
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         "cursiv-export" => {
             let r = legacy::verify_cursiv_export(&dir, flag_value(&args, "--key-id").as_deref());
@@ -92,7 +108,7 @@ fn main() -> ExitCode {
 }
 
 /// Final evidence report: verification verdicts, then scientific flags, with synthetic data labelled.
-fn render_markdown(r: &verify::Report, s: &science::ScienceReport) -> String {
+fn render_markdown(r: &verify::Report, s: &science::ScienceReport, rs: &reasoning::ReasoningReport) -> String {
     let v = &r.verdicts;
     let synthetic: u64 = r.robots.values().map(|x| x.synthetic_records).sum();
     let total: u64 = r.robots.values().map(|x| x.records).sum();
@@ -145,7 +161,31 @@ fn render_markdown(r: &verify::Report, s: &science::ScienceReport) -> String {
     if !any {
         md += "None.\n";
     }
-    md += "\n## 3. What this report does not show\n\n";
+    md += "\n## 3. Derived results and findings\n\n";
+    md += &format!("{}\n\nDerived values: {} recomputed and matching, {} mismatched, {} not reproducible, {} with missing inputs.\n\n",
+                   rs.statement, rs.derivations["verified"], rs.derivations["mismatch"], rs.derivations["not_reproducible"], rs.derivations["inputs_missing"]);
+    if rs.findings.is_empty() {
+        md += "No findings were recorded.\n";
+    } else {
+        md += "| Finding | Author | Label | Evidence | Status |\n|---|---|---|---|---|\n";
+        for f in &rs.findings {
+            let who = match (&f.author_kind[..], &f.model) {
+                ("ai_model", Some(m)) => format!("{} (AI: {m})", f.author),
+                _ => format!("{} ({})", f.author, f.author_kind),
+            };
+            let tag = if f.synthetic { " *(synthetic)*" } else { "" };
+            md += &format!("| {}{tag} | {who} | {} | {} supporting, {} contradicting{} | **{}** |\n", f.statement.replace('|', "\\|"), f.epistemic, f.supports, f.contradicts,
+                           if f.assumptions.is_empty() { String::new() } else { format!("; assumes: {}", f.assumptions.join("; ")) }, f.status);
+        }
+    }
+    let rflags: Vec<_> = rs.flags.iter().filter(|f| f.severity != "info").collect();
+    if !rflags.is_empty() {
+        md += "\n";
+        for f in rflags.iter().take(100) {
+            md += &format!("- **{}** `{}` ({} {}): {}\n", f.severity, f.code, f.robot_id, f.observation_id, f.message);
+        }
+    }
+    md += "\n## 4. What this report does not show\n\n";
     for l in &r.limits {
         md += &format!("- {l}\n");
     }

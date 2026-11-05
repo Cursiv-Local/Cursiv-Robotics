@@ -7,6 +7,7 @@ use cursiv_evidence::crypto::{public_b64, sha256_hex, Envelope, Identity, CHECKP
 use base64::Engine;
 use cursiv_evidence::merkle;
 use cursiv_evidence::model::*;
+use cursiv_evidence::model::Claim;
 use cursiv_evidence::science::{self, Profile};
 use cursiv_evidence::store::{Outcome, Store};
 use cursiv_evidence::trust::{TrustStore, TrustedKey};
@@ -56,6 +57,7 @@ impl Robot {
             processing: vec![],
             quality: None,
             correction: None,
+            claim: None,
         }
     }
 
@@ -509,4 +511,102 @@ fn dense_or_hostile_packages_cannot_explode_the_agreement_check() {
     assert!(s.counts["contradiction"] > 1_000_000, "every disagreeing pair is still counted: {:?}", s.counts);
     assert!(s.flags.iter().filter(|f| f.code == "contradiction").count() <= science::MAX_FLAGS_PER_GROUP);
     assert!(s.counts.contains_key("agreement_check_truncated"));
+}
+
+// ---- reproducible derivations and evidence-linked findings -------------------------------
+
+fn derived(r: &Robot, n: u64, op: &str, inputs: &[&Observation], value: f64, with_step: bool) -> Observation {
+    let mut o = r.obs(n, "air_temperature_mean", value, "2026-11-05T10:30:00Z");
+    o.provenance.source = "derived".into();
+    o.provenance.derived_from = inputs.iter().map(|i| format!("{}/{}", i.robot_id, i.observation_id)).collect();
+    if with_step {
+        o.processing.push(ProcessingStep { step: "cursiv.derive".into(), software: "t".into(), version: "1".into(),
+                                           parameters: Some(serde_json::json!({"op": op, "params": {}})) });
+    }
+    o
+}
+
+fn finding(r: &Robot, n: u64, epistemic: &str, author_kind: &str, supports: &[&Observation], synthetic: bool) -> Observation {
+    let mut o = r.obs(n, "finding", 0.0, "2026-11-05T11:00:00Z");
+    o.measurement = None;
+    o.synthetic = synthetic;
+    o.provenance.source = "interpretation".into();
+    o.claim = Some(Claim { statement: "the site is warmer in the east".into(), epistemic: epistemic.into(), author_kind: author_kind.into(),
+                           model: (author_kind == "ai_model").then(|| "example-model".into()),
+                           supports: supports.iter().map(|i| format!("{}/{}", i.robot_id, i.observation_id)).collect(),
+                           contradicts: vec![], assumptions: vec![] });
+    o
+}
+
+fn reason(l: &Lab, name: &str) -> (verify::Report, cursiv_evidence::reasoning::ReasoningReport) {
+    let rep = l.verify(&l.export(name));
+    let sci = science::validate(&rep.records, &rep.receipts, &Profile::survey_default());
+    let rs = cursiv_evidence::reasoning::analyse(&rep.records, Some(&sci));
+    (rep, rs)
+}
+
+#[test]
+fn a_validly_signed_but_wrong_derived_result_is_caught_by_recomputation() {
+    let mut l = lab("derive");
+    let r = &mut l.robots[0];
+    let ins: Vec<Observation> = (1..=4).map(|k| r.obs(k, "air_temperature", 10.0 + k as f64, "2026-11-05T10:00:00Z")).collect();
+    let mut envs: Vec<Envelope> = ins.iter().map(|o| r.record(o.clone())).collect();
+    let refs: Vec<&Observation> = ins.iter().collect();
+    envs.push(r.record(derived(r, 10, "mean", &refs, 12.5, true)));         // correct: (11+12+13+14)/4
+    envs.push(r.record(derived(r, 11, "mean", &refs, 13.1, true)));         // wrong, but properly signed
+    envs.push(r.record(derived(r, 12, "mean", &refs, 12.5, false)));        // no method stated
+    let mut ghost = r.obs(99, "air_temperature", 0.0, "2026-11-05T10:00:00Z");
+    ghost.observation_id = "never-recorded".into();
+    envs.push(r.record(derived(r, 13, "mean", &[&ghost], 0.0, true)));      // cites a missing input
+    let mut real = derived(r, 14, "mean", &refs, 12.5, true);
+    real.synthetic = true;
+    envs.push(r.record(real));
+    for o in l.store.ingest_batch(&envs).unwrap() {
+        assert!(matches!(o, Outcome::Accepted { .. }), "{o:?}");
+    }
+    let (rep, rs) = reason(&l, "pkg");
+    assert_eq!(rep.verdicts.integrity, "pass", "a wrong result can be perfectly signed: integrity is not correctness");
+    assert_eq!(rs.derivations["verified"], 2);
+    assert_eq!(rs.derivations["mismatch"], 1);
+    assert_eq!(rs.derivations["not_reproducible"], 1);
+    assert_eq!(rs.derivations["inputs_missing"], 1);
+    assert!(rs.flags.iter().any(|f| f.code == "derivation_mismatch" && f.message.contains("recomputes to 12.5")));
+}
+
+#[test]
+fn findings_are_checked_against_the_evidence_they_cite() {
+    let mut l = lab("findings");
+    let (a, b) = l.robots.split_at_mut(1);
+    let (rover, analyst) = (&mut a[0], &mut b[0]);
+    let o1 = rover.obs(1, "air_temperature", 15.0, "2026-11-05T10:00:00Z");
+    let mut fix = rover.obs(2, "air_temperature", 15.4, "2026-11-05T10:00:00Z");
+    fix.correction = Some(Correction { corrects_observation_id: o1.observation_id.clone(), reason: "offset".into() });
+    let envs = vec![rover.record(o1.clone()), rover.record(fix.clone())];
+    l.store.ingest_batch(&envs).unwrap();
+    let mut ghost = o1.clone();
+    ghost.observation_id = "rover-01-missing".into();
+    let cases = [
+        finding(analyst, 1, "inferred", "human", &[&fix], true),     // well supported
+        finding(analyst, 2, "known", "ai_model", &[&fix], true),     // AI cannot be the authority for "known"
+        finding(analyst, 3, "inferred", "human", &[], true),         // cites nothing
+        finding(analyst, 4, "inferred", "human", &[&ghost], true),   // cites a record that does not exist
+        finding(analyst, 5, "inferred", "human", &[&o1], true),      // cites a value that was later corrected
+        finding(analyst, 6, "inferred", "human", &[&fix], false),    // about synthetic data, not marked synthetic
+        finding(analyst, 7, "assumed", "human", &[], true),          // an assumption may stand without support
+    ];
+    let envs: Vec<Envelope> = cases.into_iter().map(|o| analyst.record(o)).collect();
+    for o in l.store.ingest_batch(&envs).unwrap() {
+        assert!(matches!(o, Outcome::Accepted { .. }), "{o:?}");
+    }
+    // structural rules at ingest: an AI claim must name its model; a claim needs source "interpretation"
+    let mut nameless = finding(analyst, 8, "inferred", "ai_model", &[&fix], true);
+    nameless.claim.as_mut().unwrap().model = None;
+    let e = analyst.record(nameless);
+    assert!(matches!(l.store.ingest_batch(&[e]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "invalid_observation"));
+    let (_, rs) = reason(&l, "pkg");
+    let status: Vec<&str> = rs.findings.iter().map(|f| f.status.as_str()).collect();
+    assert_eq!(status, ["well_supported", "invalid", "invalid", "invalid", "supported_with_caveats", "invalid", "unsupported"]);
+    for code in ["ai_claim_marked_known", "unsupported_claim", "citation_missing", "citation_superseded", "synthetic_propagation"] {
+        assert!(rs.flags.iter().any(|f| f.code == code), "missing {code}");
+    }
 }

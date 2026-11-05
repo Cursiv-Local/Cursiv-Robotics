@@ -153,8 +153,8 @@ def test_demo_end_to_end(tmp_path):
     assert "SYNTHETIC DATA" in report and "not determined" in report
 
 
-def test_all_fifteen_fault_scenarios(tmp_path):
+def test_all_seventeen_fault_scenarios(tmp_path):
     faults.RESULTS.clear()
     assert faults.main(["--out", str(tmp_path / "faults")]) == 0
     r = json.loads((tmp_path / "faults/fault-results.json").read_text())
-    assert r["total"] == 15 and r["passed"] == 15
+    assert r["total"] == 17 and r["passed"] == 17

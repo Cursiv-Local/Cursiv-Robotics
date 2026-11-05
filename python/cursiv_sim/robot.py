@@ -8,13 +8,14 @@ acceptance results and the bridge's record count/head.
 from __future__ import annotations
 
 import json
+import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .client import BridgeClient, LinkDown
-from .identity import CHECKPOINT_TYPE, RECORD_TYPE, Identity, merkle_root, payload_hash
+from .identity import CHECKPOINT_TYPE, RECORD_TYPE, Identity, body_json, merkle_root, payload_hash
 
 SOFTWARE = "cursiv-sim"
 VERSION = "0.1.0"
@@ -111,6 +112,40 @@ class RobotAgent:
             "correction": correction,
         }
 
+    # --- derived results and findings (checked by the verifier's `reasoning` module) ----------
+    def derive(self, op: str, inputs: list[dict], *, params: dict | None = None, observation_type: str | None = None) -> dict:
+        """Record a derived result. The verifier re-computes it from the cited inputs, so it must be
+        computed exactly as `crates/cursiv-evidence/src/reasoning.rs::recompute` does."""
+        obs = [body_json(e)["observation"] for e in inputs]
+        values = [(o["measurement"]["value"], o["measurement"]["unit"]) for o in obs]
+        value, unit = recompute(op, params or {}, values)
+        same_place = len({(o["location"] or {}).get("lat") for o in obs}) == 1 and obs[0]["location"]
+        o = self.observation(observation_type or f"{obs[0]['observation_type']}_{op}",
+                             sensor={"sensor_id": f"{self.robot_id}-compute", "sensor_type": "computation", "model": None, "calibration": None},
+                             value=value, unit=unit, uncertainty=None,
+                             sensor_time=max(x["sensor_time"] for x in obs if x["sensor_time"]),
+                             derived_from=[f"{x['robot_id']}/{x['observation_id']}" for x in obs],
+                             processing=[{"step": "cursiv.derive", "software": SOFTWARE, "version": VERSION,
+                                          "parameters": {"op": op, "params": params or {}}}])
+        if same_place:
+            o["location"] = obs[0]["location"]
+        o["provenance"]["source"] = "derived"
+        o["synthetic"] = any(x["synthetic"] for x in obs)
+        o["quality"] = {"flag": "unassessed", "basis": "derived value; reproducibility is checked by the verifier, plausibility is not implied"}
+        return self.record(o)
+
+    def finding(self, statement: str, *, epistemic: str, author_kind: str = "human", model: str | None = None,
+                supports: list[dict] = (), contradicts: list[dict] = (), assumptions: list[str] = ()) -> dict:
+        """Record an interpretation citing signed observations. It is evidence about reasoning, not proof."""
+        cite = lambda envs: [f"{body_json(e)['observation']['robot_id']}/{body_json(e)['observation']['observation_id']}" for e in envs]
+        cited = [body_json(e)["observation"] for e in [*supports, *contradicts]]
+        o = self.observation("finding", sensor={"sensor_id": f"{self.robot_id}-analysis", "sensor_type": "analysis", "model": None, "calibration": None})
+        o.update(measurement=None, synthetic=any(c["synthetic"] for c in cited), quality=None,
+                 claim={"statement": statement, "epistemic": epistemic, "author_kind": author_kind, "model": model,
+                        "supports": cite(supports), "contradicts": cite(contradicts), "assumptions": list(assumptions)})
+        o["provenance"]["source"] = "interpretation"
+        return self.record(o)
+
     def record(self, observation: dict) -> dict:
         rec = {"schema": "cursiv-record-1", "robot_id": self.robot_id, "seq": len(self.envelopes) + 1,
                "prev": self.hashes[-1] if self.hashes else "genesis", "written_time": utc(datetime.now(timezone.utc)),
@@ -173,3 +208,46 @@ class RobotAgent:
         except LinkDown:
             self.link_up = False
             return {"sent": 0, "link": "lost", "pending": len(self.envelopes) - self.acked}
+
+
+CONVERSIONS = {("degC", "K"): lambda x: x + 273.15, ("K", "degC"): lambda x: x - 273.15,
+               ("degC", "degF"): lambda x: x * 9.0 / 5.0 + 32.0, ("degF", "degC"): lambda x: (x - 32.0) * 5.0 / 9.0,
+               ("hPa", "Pa"): lambda x: x * 100.0, ("Pa", "hPa"): lambda x: x / 100.0, ("hPa", "kPa"): lambda x: x / 10.0,
+               ("kPa", "hPa"): lambda x: x * 10.0, ("%", "1"): lambda x: x / 100.0, ("1", "%"): lambda x: x * 100.0,
+               ("m", "cm"): lambda x: x * 100.0, ("cm", "m"): lambda x: x / 100.0}
+
+
+def recompute(op: str, params: dict, inputs: list[tuple[float, str]]) -> tuple[float, str]:
+    """Mirror of reasoning.rs::recompute (same operation order, IEEE 754 doubles)."""
+    unit = inputs[0][1]
+    xs = [v for v, _ in inputs]
+    if op not in ("count", "linear", "convert") and any(u != unit for _, u in inputs):
+        raise ValueError("inputs have different units")
+    n = float(len(xs))
+    total = 0.0
+    for x in xs:
+        total += x
+    if op == "mean":
+        return total / n, unit
+    if op == "sum":
+        return total, unit
+    if op == "count":
+        return n, "1"
+    if op == "min":
+        return min(xs), unit
+    if op == "max":
+        return max(xs), unit
+    if op == "median":
+        s, k = sorted(xs), len(xs) // 2
+        return (s[k] if len(s) % 2 else (s[k - 1] + s[k]) / 2.0), unit
+    if op == "stddev":
+        m = total / n
+        ss = 0.0
+        for x in xs:
+            ss += (x - m) * (x - m)
+        return math.sqrt(ss / (n - 1.0)), unit
+    if op == "linear":
+        return params["a"] * xs[0] + params["b"], params.get("unit", unit)
+    if op == "convert":
+        return CONVERSIONS[(unit, params["to"])](xs[0]), params["to"]
+    raise ValueError(f"unknown operation {op}")

@@ -10,6 +10,7 @@ pub mod legacy;
 pub mod merkle;
 pub mod model;
 pub mod package;
+pub mod reasoning;
 pub mod science;
 pub mod store;
 pub mod trust;

@@ -6,8 +6,8 @@
  2 launch three simulated robots             8 detect it
  3 run a survey mission                      9 simulate lost communications (and a dropped transfer)
  4 collect observations                     10 reconnect and synchronize
- 5 generate an evidence package             11 final scientific evidence report
- 6 verify it independently
+ 5 generate an evidence package             11 derived results and evidence-linked findings
+ 6 verify it independently                  12 final scientific evidence report
 Everything produced is SYNTHETIC.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ def main(argv=None) -> int:
     out = Path(a.out)
     if out.exists():
         shutil.rmtree(out)
-    lab = Lab(out, list(ROVERS))
+    lab = Lab(out, list(ROVERS) + ["analyst-01", "ai-assist-01"])
     lab.enrol()
     summary = {"synthetic": True, "steps": {}}
 
@@ -126,7 +126,31 @@ def main(argv=None) -> int:
     print(f"      sent {r['sent']}; bridge has {head['count']} of {len(g.envelopes)}; checkpoint sent")
     summary["resync"] = {"sent": r["sent"], "bridge_count": head["count"], "robot_count": len(g.envelopes)}
 
-    say(11, "Final evidence package and report")
+    say(11, "Derived results and findings, each citing the signed observations they rest on")
+    r2, r3 = rovers["rover-02"].agent, rovers["rover-03"].agent
+    temps = lambda g: [e for e in g.envelopes if body_json(e)["observation"]["observation_type"] == "air_temperature"]
+    t2, t3 = temps(r2), temps(r3)
+    mean2 = r2.derive("mean", t2[half:])                     # computed on board, re-computed by the verifier
+    mean3 = r3.derive("mean", t3[half:])
+    kelvin = r2.derive("convert", [mean2], params={"to": "K"}, observation_type="air_temperature_mean")
+    for g in (r2, r3):
+        g.sync()
+    analyst = RobotAgent("analyst-01", lab.robot_state, lab.client, mission_id="willow-basin-survey")
+    a = analyst.finding("During the second half of the survey rover-03's air temperature reads about 4 degC above "
+                        "rover-02's co-located sensor; one of the two sensors is likely biased.",
+                        epistemic="inferred", supports=[mean2, mean3], contradicts=[], assumptions=["the two sensors observed the same air mass"])
+    ai = RobotAgent("ai-assist-01", lab.robot_state, lab.client, mission_id="willow-basin-survey")
+    b = ai.finding("Rover-02's reading is more plausible because its sensor is a calibrated PT100.", epistemic="inferred",
+                   author_kind="ai_model", model="example-local-model-1", supports=[mean2],
+                   assumptions=["calibration metadata is accurate"])
+    for g in (analyst, ai):
+        g.sync()
+    v = body_json(mean2)["observation"]["measurement"]["value"]
+    print(f"      rover-02 mean {v:.3f} degC ({body_json(kelvin)['observation']['measurement']['value']:.3f} K); "
+          f"rover-03 mean {body_json(mean3)['observation']['measurement']['value']:.3f} degC")
+    print("      findings recorded: 1 by a human analyst, 1 by an AI model (labelled inferred, model named)")
+
+    say(12, "Final evidence package and report")
     pkg2 = lab.export("survey-final")
     report_md = out / "evidence-report.md"
     code, rep = lab.verify(pkg2, report_md=report_md)
@@ -138,8 +162,14 @@ def main(argv=None) -> int:
                                 "records": {k: v["records"] for k, v in rep["verification"]["robots"].items()}}
     lab.stop()
     (out / "demo-summary.json").write_text(json.dumps(summary, indent=2))
+    rsn = rep["reasoning"]
+    print("      derived results recomputed:", rsn["derivations"])
+    for f in rsn["findings"]:
+        print(f"      finding by {f['author']} ({f['author_kind']}): {f['epistemic']}, {f['status']}")
+    summary["reasoning"] = {"derivations": rsn["derivations"], "findings": [{k: f[k] for k in ("author", "author_kind", "epistemic", "status")} for f in rsn["findings"]]}
     ok = (summary["clean_package"]["exit"] == 0 and summary["altered_package"]["exit"] == 1
-          and summary["final_package"]["exit"] == 0 and sci.get("contradiction", 0) > 0)
+          and summary["final_package"]["exit"] == 0 and sci.get("contradiction", 0) > 0
+          and rsn["derivations"]["verified"] == 3 and len(rsn["findings"]) == 2)
     print("\nDemo", "PASSED" if ok else "FAILED", "- all data above is SYNTHETIC.")
     return 0 if ok else 1
 

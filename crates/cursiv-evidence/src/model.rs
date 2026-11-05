@@ -142,6 +142,26 @@ pub struct Correction {
     pub reason: String,
 }
 
+/// An interpretation: a statement about the evidence, signed by whoever made it, citing the
+/// observations it rests on. Recorded like any observation, so it is append-only and verifiable.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Claim {
+    pub statement: String,
+    /// known | inferred | assumed | unknown (see docs/ROBOTICS_ARCHITECTURE.md).
+    pub epistemic: String,
+    /// human | ai_model | software
+    pub author_kind: String,
+    /// Required for ai_model: the exact model identifier.
+    pub model: Option<String>,
+    /// observation_ids this statement rests on.
+    pub supports: Vec<String>,
+    /// observation_ids that count against it (must be cited, not hidden).
+    pub contradicts: Vec<String>,
+    /// Stated assumptions the statement depends on.
+    pub assumptions: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Observation {
@@ -164,6 +184,9 @@ pub struct Observation {
     pub processing: Vec<ProcessingStep>,
     pub quality: Option<Quality>,
     pub correction: Option<Correction>,
+    /// Present only on interpretations (observation_type "finding", provenance.source "interpretation").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Claim>,
 }
 
 /// One entry in a robot's append-only log, signed by the robot.
@@ -252,11 +275,34 @@ impl Observation {
                 p.push("attachment sha256 must be 64 lowercase hex characters".into());
             }
         }
-        if !matches!(self.provenance.source.as_str(), "sensor" | "derived" | "manual" | "simulated") {
-            p.push("provenance.source must be sensor, derived, manual or simulated".into());
+        match self.provenance.source.as_str() {
+            "simulated" if !self.synthetic => p.push("simulated observations must be marked synthetic".into()),
+            "sensor" | "manual" if self.synthetic => p.push("sensor and manual observations cannot be marked synthetic".into()),
+            "simulated" | "sensor" | "manual" | "derived" | "interpretation" => {}
+            _ => p.push("provenance.source must be sensor, manual, simulated, derived or interpretation".into()),
         }
-        if self.synthetic != (self.provenance.source == "simulated") {
-            p.push("synthetic must be true exactly when provenance.source is \"simulated\"".into());
+        // derived results and interpretations inherit "synthetic" from their inputs (checked by `reasoning`).
+        match (&self.claim, self.provenance.source.as_str()) {
+            (Some(c), "interpretation") => {
+                if self.observation_type != "finding" || self.measurement.is_some() {
+                    p.push("an interpretation is observation_type \"finding\" with no measurement".into());
+                }
+                if !matches!(c.epistemic.as_str(), "known" | "inferred" | "assumed" | "unknown") {
+                    p.push("claim.epistemic must be known, inferred, assumed or unknown".into());
+                }
+                if !matches!(c.author_kind.as_str(), "human" | "ai_model" | "software") {
+                    p.push("claim.author_kind must be human, ai_model or software".into());
+                }
+                if c.author_kind == "ai_model" && c.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
+                    p.push("an AI-authored claim must name the exact model".into());
+                }
+                if c.statement.trim().is_empty() || c.statement.len() > 4000 {
+                    p.push("claim.statement must be 1-4000 characters".into());
+                }
+            }
+            (None, "interpretation") => p.push("provenance.source \"interpretation\" requires a claim".into()),
+            (Some(_), _) => p.push("a claim requires provenance.source \"interpretation\"".into()),
+            (None, _) => {}
         }
         if let Some(q) = &self.quality {
             if !matches!(q.flag.as_str(), "good" | "suspect" | "bad" | "unassessed") {
