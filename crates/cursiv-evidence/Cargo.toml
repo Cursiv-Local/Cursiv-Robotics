@@ -1,0 +1,20 @@
+[package]
+name = "cursiv-evidence"
+description = "Cursiv Robotics evidence core: observation model, signed append-only logs, content-addressed attachments, packages and verification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+base64.workspace = true

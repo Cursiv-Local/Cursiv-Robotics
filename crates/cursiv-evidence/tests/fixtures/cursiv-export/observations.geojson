@@ -1,0 +1,35 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.2,
+          45.1
+        ]
+      },
+      "properties": {
+        "id": "0077a9b84741",
+        "seq": 3,
+        "recorded_utc": "2026-11-05T03:56:11Z",
+        "observer": "Dana Ruiz",
+        "site": "Willow Basin",
+        "measurements": [
+          {
+            "name": "water temperature",
+            "value": "21.60",
+            "number": 21.6,
+            "unit": "°C"
+          }
+        ],
+        "note": "Synthetic fixture for Cursiv-Robotics interop tests — café ñ",
+        "hash": "61184a6c284da0fc5cc92c527ac7920abdbf06522cc13ea5d5722e0d10e41799",
+        "sample_id": "",
+        "notebook_name": "",
+        "location_accuracy_m": null
+      }
+    }
+  ]
+}

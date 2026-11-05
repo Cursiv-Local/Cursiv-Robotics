@@ -1,0 +1,100 @@
+{
+  "exported_utc": "2026-11-05T03:56:11Z",
+  "integrity": "intact",
+  "notebooks": {},
+  "entries": [
+    {
+      "schema": 1,
+      "id": "6497d693bae2",
+      "seq": 1,
+      "recorded_utc": "2026-11-05T03:56:11Z",
+      "recorded_local": "2026-11-05T03:56:11+00:00",
+      "observer": "Dana Ruiz",
+      "sample_id": "",
+      "site": "Willow Basin",
+      "lat": 45.1,
+      "lon": -122.2,
+      "location_source": "",
+      "location_accuracy_m": null,
+      "location_fix_utc": "",
+      "measurements": [
+        {
+          "name": "water temperature",
+          "value": "21.40",
+          "number": 21.4,
+          "unit": "°C"
+        }
+      ],
+      "note": "Synthetic fixture for Cursiv-Robotics interop tests — café ñ",
+      "photos": [],
+      "corrects": null,
+      "reason": "",
+      "device": "45368716d1e4",
+      "app_version": "",
+      "prev": "genesis",
+      "hash": "fa8bd81296d7f52730c8de1c0adf4d861aad7f2fc718c7ee96d4618a4e711121"
+    },
+    {
+      "schema": 1,
+      "id": "41fdfc36c3d2",
+      "seq": 2,
+      "recorded_utc": "2026-11-05T03:56:11Z",
+      "recorded_local": "2026-11-05T03:56:11+00:00",
+      "observer": "Dana Ruiz",
+      "sample_id": "",
+      "site": "Willow Basin",
+      "lat": null,
+      "lon": null,
+      "location_source": "",
+      "location_accuracy_m": null,
+      "location_fix_utc": "",
+      "measurements": [
+        {
+          "name": "pH",
+          "value": "7.2",
+          "number": 7.2,
+          "unit": ""
+        }
+      ],
+      "note": "",
+      "photos": [],
+      "corrects": null,
+      "reason": "",
+      "device": "45368716d1e4",
+      "app_version": "",
+      "prev": "fa8bd81296d7f52730c8de1c0adf4d861aad7f2fc718c7ee96d4618a4e711121",
+      "hash": "41f318c8342757625f663bb6c78a707009f96d949d1ec5c5be353fde82d90deb"
+    },
+    {
+      "schema": 1,
+      "id": "0077a9b84741",
+      "seq": 3,
+      "recorded_utc": "2026-11-05T03:56:11Z",
+      "recorded_local": "2026-11-05T03:56:11+00:00",
+      "observer": "Dana Ruiz",
+      "sample_id": "",
+      "site": "Willow Basin",
+      "lat": 45.1,
+      "lon": -122.2,
+      "location_source": "",
+      "location_accuracy_m": null,
+      "location_fix_utc": "",
+      "measurements": [
+        {
+          "name": "water temperature",
+          "value": "21.60",
+          "number": 21.6,
+          "unit": "°C"
+        }
+      ],
+      "note": "Synthetic fixture for Cursiv-Robotics interop tests — café ñ",
+      "photos": [],
+      "corrects": "6497d693bae2",
+      "reason": "sensor re-read",
+      "device": "45368716d1e4",
+      "app_version": "",
+      "prev": "41f318c8342757625f663bb6c78a707009f96d949d1ec5c5be353fde82d90deb",
+      "hash": "61184a6c284da0fc5cc92c527ac7920abdbf06522cc13ea5d5722e0d10e41799"
+    }
+  ]
+}

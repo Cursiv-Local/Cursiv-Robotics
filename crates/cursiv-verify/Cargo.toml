@@ -1,0 +1,12 @@
+[package]
+name = "cursiv-verify"
+description = "Standalone verifier for Cursiv Robotics evidence packages and Cursiv notebook exports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cursiv-evidence = { path = "../cursiv-evidence" }
+serde_json.workspace = true

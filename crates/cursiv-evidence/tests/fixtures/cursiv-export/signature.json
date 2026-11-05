@@ -1,0 +1,29 @@
+{
+  "signed": {
+    "format": "cursiv-export-1",
+    "exported_utc": "2026-11-05T03:56:11Z",
+    "exported_by_device": "45368716d1e4",
+    "log_head": {
+      "format": "cursiv-head-1",
+      "device": "45368716d1e4",
+      "entries": 3,
+      "seq": 3,
+      "hash": "61184a6c284da0fc5cc92c527ac7920abdbf06522cc13ea5d5722e0d10e41799",
+      "signed_utc": "2026-11-05T03:56:11Z"
+    },
+    "entries_exported": 3,
+    "devices": [
+      "45368716d1e4"
+    ],
+    "integrity": "intact",
+    "files": {
+      "observations.json": "c0239e048a9885be89fe7c20704d90f7674948942058db65e5d42e9d95ec6f65",
+      "field-report.html": "a43acb75e55cdb0af9741573da096cf80741a68959a90ca002a85047a24e3b8b",
+      "observations.geojson": "750dc43678d0e6aeba473d425478b1dfa6c9f0c45efc364a2496d67cfbbba8cc",
+      "observations.csv": "5b51a7d8581d84bde4a142b4cdac1530b2a9c5d08e971b6ce4987bfbb9feea04"
+    }
+  },
+  "public_key": "Pw8GwrKTNxSJItCvxkmMYKDGXoDZ6xvC7jVVdrMQxLM=",
+  "key_id": "1f12f0afcb7ddf2d",
+  "signature": "3xyZDubFmiKM1KthmVbMAlwsKPH+tY5Drk1m7Sij0Bxa8NxICmyV/30TnpwKmGa3V83N25jK4xLQ7X47CYPeBw=="
+}

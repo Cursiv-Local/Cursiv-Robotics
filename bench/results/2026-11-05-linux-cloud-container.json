@@ -1,0 +1,170 @@
+{
+  "schema": "cursiv-bench-1",
+  "time": "2026-11-05T04:09:50Z",
+  "hardware": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "logical_cpus": 4,
+    "memory_gib": 15.7,
+    "os": "Linux-6.18.44-fc-v236-x86_64-with-glibc2.39",
+    "python": "3.13.18",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "build": "cargo --release"
+  },
+  "bridge_binary": "target/release/cursiv-bridge",
+  "config": {
+    "queue": 256,
+    "workers": 8,
+    "client_threads": "min(32, agents)",
+    "batch": 100,
+    "fsync": "per coalesced batch"
+  },
+  "note": "One computer; simulated agents are threads signing records, not robots.",
+  "scales": [
+    {
+      "agents": 1,
+      "records_per_agent": 5000,
+      "records": 5000,
+      "stored": 5000,
+      "verify_exit": 0,
+      "client_sign_records_per_s": 3154,
+      "ingest_records_per_s": 10150,
+      "ingest_s": 0.493,
+      "batch_latency_ms": {
+        "batch_size": 100,
+        "p50": 9.72,
+        "p95": 11.26,
+        "max": 15.89
+      },
+      "export_s": 0.04,
+      "verify_s_including_science": 0.643,
+      "verify_records_per_s": 7778,
+      "store_bytes_per_record": 1752,
+      "payload_bytes_per_record": 1025,
+      "overhead_ratio": 1.71,
+      "restart_after_kill_s": 0.052,
+      "bridge": {
+        "peak_rss_mib": 11.9,
+        "cpu_s": 0.39
+      }
+    },
+    {
+      "agents": 3,
+      "records_per_agent": 3000,
+      "records": 9000,
+      "stored": 9000,
+      "verify_exit": 0,
+      "client_sign_records_per_s": 3406,
+      "ingest_records_per_s": 12517,
+      "ingest_s": 0.719,
+      "batch_latency_ms": {
+        "batch_size": 100,
+        "p50": 23.67,
+        "p95": 27.76,
+        "max": 29.94
+      },
+      "export_s": 0.065,
+      "verify_s_including_science": 1.095,
+      "verify_records_per_s": 8222,
+      "store_bytes_per_record": 1751,
+      "payload_bytes_per_record": 1025,
+      "overhead_ratio": 1.71,
+      "restart_after_kill_s": 0.102,
+      "bridge": {
+        "peak_rss_mib": 14.6,
+        "cpu_s": 0.72
+      }
+    },
+    {
+      "agents": 10,
+      "records_per_agent": 1000,
+      "records": 10000,
+      "stored": 10000,
+      "verify_exit": 0,
+      "client_sign_records_per_s": 3393,
+      "ingest_records_per_s": 12115,
+      "ingest_s": 0.825,
+      "batch_latency_ms": {
+        "batch_size": 100,
+        "p50": 69.35,
+        "p95": 136.53,
+        "max": 151.68
+      },
+      "export_s": 0.081,
+      "verify_s_including_science": 1.044,
+      "verify_records_per_s": 9577,
+      "store_bytes_per_record": 1750,
+      "payload_bytes_per_record": 1024,
+      "overhead_ratio": 1.71,
+      "restart_after_kill_s": 0.103,
+      "bridge": {
+        "peak_rss_mib": 16.7,
+        "cpu_s": 0.79
+      }
+    },
+    {
+      "agents": 100,
+      "records_per_agent": 200,
+      "records": 20000,
+      "stored": 20000,
+      "verify_exit": 0,
+      "client_sign_records_per_s": 3422,
+      "ingest_records_per_s": 12437,
+      "ingest_s": 1.608,
+      "batch_latency_ms": {
+        "batch_size": 100,
+        "p50": 247.25,
+        "p95": 294.53,
+        "max": 308.02
+      },
+      "export_s": 0.189,
+      "verify_s_including_science": 2.285,
+      "verify_records_per_s": 8753,
+      "store_bytes_per_record": 1749,
+      "payload_bytes_per_record": 1023,
+      "overhead_ratio": 1.71,
+      "restart_after_kill_s": 0.203,
+      "bridge": {
+        "peak_rss_mib": 21.4,
+        "cpu_s": 1.67
+      }
+    },
+    {
+      "agents": 1000,
+      "records_per_agent": 20,
+      "records": 20000,
+      "stored": 20000,
+      "verify_exit": 0,
+      "client_sign_records_per_s": 3156,
+      "ingest_records_per_s": 9837,
+      "ingest_s": 2.033,
+      "batch_latency_ms": {
+        "batch_size": 100,
+        "p50": 62.79,
+        "p95": 80.67,
+        "max": 97.48
+      },
+      "export_s": 0.484,
+      "verify_s_including_science": 1.945,
+      "verify_records_per_s": 10283,
+      "store_bytes_per_record": 1745,
+      "payload_bytes_per_record": 1020,
+      "overhead_ratio": 1.71,
+      "restart_after_kill_s": 0.215,
+      "bridge": {
+        "peak_rss_mib": 37.7,
+        "cpu_s": 4.33
+      }
+    }
+  ],
+  "attachments": {
+    "uploads": 50,
+    "bytes_each": 1048576,
+    "mib_per_s": 217.2,
+    "seconds": 0.23
+  },
+  "sync_after_outage": {
+    "records_buffered_offline": 5000,
+    "sync_s": 0.467,
+    "sent": 5000
+  }
+}
