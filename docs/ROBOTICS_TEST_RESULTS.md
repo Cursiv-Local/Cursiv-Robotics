@@ -30,12 +30,18 @@ desktop has not been tested directly; Windows Server CI is the closest check ava
 | Interoperability (`tests/test_interop.py`, optional packages installed; earlier run on this branch's base) | `python3 -m pytest tests -q` | 4 passed |
 | One-command demo | `python python/cursiv_demo` | DEMO PASSED: expected results identical, tampering detected (5 error codes), tampered copy refused at import, source unchanged |
 
-## Windows (GitHub Actions)
+## Windows (GitHub Actions, `windows-latest`, Python 3.12.10)
 
-Run 2 (commit 881756a): build, all 43 Rust tests and clippy passed on `windows-latest`. The Python and
-PowerShell demo results are being filled in from CI.
+| Check | Result |
+|---|---|
+| `cargo build --release`, `cargo test --release` (43 tests), clippy `-D warnings` | passed (runs 2 and 6) |
+| `pytest tests` | **28 passed, 3 skipped in 406.89 s** (run 2, commit 881756a). This includes the three virtual missions, which reproduce the same signed chain heads as on Linux, so the floating-point concern (audit R7) did not occur. |
+| `scripts\demo.ps1` | **not confirmed yet**: run 2 was cancelled as this step started, and run 6 had not reached it when this was written |
 
-Run 1 found two real Windows defects: git line-ending conversion broke the signed fixtures (fixed with
+The Windows Python suite took about 10 times as long as on Linux (407 s vs about 40 s). The cause has not
+been investigated; per-request fsync and process start-up on Windows are the likely candidates.
+
+Run 1 found two real Windows defects. Git's line-ending conversion broke the signed fixtures (fixed with
 `.gitattributes`, audit F16), and a symlink test assumed Linux.
 
 ## Virtual missions (simulated; `python -m cursiv_sim.missions run missions/<m>.json --check`)
