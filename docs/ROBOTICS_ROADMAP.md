@@ -5,6 +5,7 @@ Documented, not implemented. The order reflects what real deployments need first
 ## Done since the first milestone
 
 - Real data without hardware: phone recordings (phyphox) to signed evidence and a research dossier for Cursiv (`docs/PHONE_GUIDE.md`). Format fixtures follow phyphox's exporter; a real export from the owner's phone is the next validation.
+- Pre-hardware hardening (2026-11-05, `docs/AUDIT_2026-11-05.md`): storage quota, fail-stop, atomic export, live trust reload, units and GUM uncertainty propagation, duplicate/gap/timestamp checks, deterministic virtual missions (stationary, ground, underwater, aerial, multi-robot), Cursiv package contract v1 with a reference importer, property and mutation fuzz tests, Rust benchmark, CI on Linux and Windows with `cargo audit` and Rust 1.82.
 
 ## Next milestone (recommended)
 
@@ -14,10 +15,12 @@ GNSS), and a calibration record from an actual reference check. Run it for 72 ho
 flaky link. Success means:
 - every reading is verifiable with `cursiv-verify` by someone else, using only the package and a trust store;
 - the clock-drift and calibration flags behave on real data;
-- the Windows build and tests pass.
+- the same build passes on a Windows 11 desktop (CI covers Windows Server only).
 
 Alongside it:
-- CI: `cargo test`, `cargo clippy`, `cargo audit`/`cargo deny`, pytest, on Windows, Linux and macOS.
+- CI on macOS, and `cargo deny` for licences.
+- Make the Cursiv-side integration changes (`docs/CURSIV_INTEGRATION.md`), with the owner's approval.
+- Streaming verification (memory independent of package size) and a read timeout or reverse proxy for off-host use.
 - Live ROS 2 (Jazzy) test of `Ros2Forwarder` against `sensor_msgs` publishers in a container.
 - Segment files (rotate `records.jsonl` per N records, each sealed by a checkpoint), so very long missions do not need whole-log reads at start.
 

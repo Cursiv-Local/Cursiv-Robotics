@@ -1,7 +1,9 @@
 # Test results
 
-Recorded 2026-11-05 in a Linux cloud container. Every figure below was measured; nothing is estimated.
-Windows and macOS were **not** tested in this iteration.
+Recorded 2026-11-05. Every figure below was measured; nothing is estimated. Local runs used a Linux cloud
+container; Windows results come from GitHub Actions (`windows-latest`, Windows Server) running
+`.github/workflows/ci.yml`. **No test ran on a robot, sensor or single-board computer.** Windows 11 on a
+desktop has not been tested directly; Windows Server CI is the closest check available here.
 
 ## Environment
 
@@ -10,24 +12,41 @@ Windows and macOS were **not** tested in this iteration.
 | CPU | Intel Xeon Processor @ 2.10 GHz, 4 logical CPUs |
 | Memory | 15.7 GiB |
 | OS | Linux 6.18 x86_64, glibc 2.39 (Ubuntu 24.04) |
-| Rust | rustc 1.97.0, `cargo --release` |
+| Rust | rustc 1.97.0 and 1.82.0 (minimum supported), `cargo --release` |
 | Python | 3.13.18, cryptography; optional: bagit 1.9.0, securesystemslib 1.6.0, mcap 1.6.0, mcap-ros2-support 0.6.0, ioos_qc 3.0.0 |
 | ROS 2 | not installed |
 
-## Automated tests
+## Automated tests (pre-hardware hardening, local)
 
 | Suite | Command | Result |
 |---|---|---|
-| Rust unit tests (incl. DSSE PAE spec example, deterministic derivation ops) | `cargo test --release` | 6 passed |
-| Rust evidence and fault tests (`crates/cursiv-evidence/tests/faults.rs`, incl. wrong derived results and findings rules) | `cargo test --release` | 18 passed |
-| Clippy | `cargo clippy --release` | 0 warnings |
-| Python core (`tests/test_sim.py`: network and input defences, token auth, DSSE PAE, ROS 2 mapping, Rust/Python Merkle agreement, demo, all 17 faults) | `python3 -m pytest tests -q` | 9 passed, 4 interop skipped without optional packages |
-| Interoperability (`tests/test_interop.py`, optional packages installed) | `python3 -m pytest tests -q` | 4 passed: bagit-python validates packages and catches tampering; securesystemslib verifies every record and manifest as DSSE; a real ROS 2 CDR MCAP recording is imported, verified and traceable; QARTOD (ioos_qc 3.0.0) flags an implausible value and refuses a tampered package |
-| Fault suite (`python -m cursiv_sim.faults`) | real bridge binary + `cursiv-verify` | **17/17 scenarios passed** |
-| Demo (`python -m cursiv_sim.demo --steps 30`) | 12 steps | passed: 3/3 derived values recomputed, 2 findings (human and AI) supported with caveats |
+| Rust unit tests | `cargo test --release` | 7 passed |
+| Rust evidence and fault tests (`tests/faults.rs`): tampering, forks, keys, quota, fail-stop, concurrent blobs, atomic export, trust reload, units, duplicates, gaps, uncertainty propagation | `cargo test --release` | 25 passed |
+| Rust property and mutation fuzz tests (`tests/properties.rs`): 7 proptest properties × 256 cases, 150 seeded byte mutations (1,500 also run: all detected), every file deleted, neighbouring files swapped | `cargo test --release` | 11 passed |
+| Same suites on the minimum supported Rust | `cargo +1.82 test --locked --workspace` | 43 passed |
+| Clippy | `cargo clippy --release --all-targets -- -D warnings` | 0 warnings |
+| Dependency advisories | `cargo audit` (0.22.2, 1,409 advisories, 67 crates) | 0 vulnerabilities, 0 warnings |
+| Python (`pytest tests`): bridge defences, quota and trust reload, all faults, demo, three virtual missions against their expected results, phone importer incl. zip bombs, Cursiv integration (incl. ingestion by Cursiv's `documents.py`), one-command demo | `python3 -m pytest tests -q` | 27 passed, 4 interop skipped (optional packages not installed in this run) |
+| Interoperability (`tests/test_interop.py`, optional packages installed; earlier run on this branch's base) | `python3 -m pytest tests -q` | 4 passed |
+| One-command demo | `python python/cursiv_demo` | DEMO PASSED: expected results identical, tampering detected (5 error codes), tampered copy refused at import, source unchanged |
 
-Cursiv's own test suite was not run for this work, because the Cursiv repository was not changed (its
-working tree was checked clean before and after).
+## Windows (GitHub Actions)
+
+Run 2 (commit 881756a): build, all 43 Rust tests and clippy passed on `windows-latest`. The Python and
+PowerShell demo results are being filled in from CI.
+
+Run 1 found two real Windows defects: git line-ending conversion broke the signed fixtures (fixed with
+`.gitattributes`, audit F16), and a symlink test assumed Linux.
+
+## Virtual missions (simulated; `python -m cursiv_sim.missions run missions/<m>.json --check`)
+
+Each mission is seeded, so a run reproduces its `*.expected.json` exactly, signed chain heads included.
+
+| Mission | Platforms | Records | Injected failures (observed handling) | Science flags | Check |
+|---|---|---|---|---|---|
+| coastal-survey | buoy, AUV, drone, rover + analysis | 1,443 | 6 duplicate sends acknowledged; 50 corrupt uploads rejected; 53 packet losses retried; 20 station-full refusals; 1 robot restart; 1 station crash | calibration_expired 56, contradiction 5, duplicate_content 7, out_of_order_time 2, sampling_gap 1 | identical |
+| buoy-baseline | analysis-01, buoy-02 | 488 | none (control) | none of: calibration_expired, sampling_gap, duplicate_content, out_of_order_time, contradiction, out_of_range, clock_drift, sensor_time_after_write, unit_mismatch | identical |
+| drone-survey | analysis-01, drone-02 | 487 | corrupt uploads rejected 63; packet losses 48 | none of: out_of_range, contradiction, duplicate_content | identical |
 
 ## Fault scenarios (observed output)
 
@@ -77,6 +96,21 @@ custom-envelope run is kept in `bench/results/2026-11-05-linux-cloud-container.j
 - Sync after an outage: 5,000 buffered records delivered in 0.525 s.
 - Storage overhead: about 1.9× the payload. Moving to DSSE (base64 payload) raised it from about 1.75 KiB to 1.96 KiB per record; ingest and verify throughput are within run-to-run variation of the earlier run.
 - The single-threaded Python client (signing about 3,300 records/s) is slower than the bridge; batch latency at 10–100 agents is mostly queueing behind 32 concurrent client threads.
+
+## Rust core benchmark (`cargo run --release -p cursiv-evidence --example bench -- N 3`)
+
+One process and three robots, in batches of 100 with an fsync per batch. Raw data: `bench/results/2026-11-05-linux-rust-*.json`.
+**This measures software on a 4-vCPU cloud container. It says nothing about any robot computer.**
+
+| Records | Package | Sign (rec/s) | Ingest (rec/s) | Batch p50 / p99 (ms) | Export (s) | Verify (rec/s) | Reopen after stop (s) | Peak RSS, bench (MiB) | Peak RSS, `cursiv-verify` alone (MiB) |
+|---|---|---|---|---|---|---|---|---|---|
+| 3,000 | 6.0 MB | 45,334 | 14,484 | 6.7 / 11.3 | 0.018 | 17,324 | 0.023 | 19.8 | 13.1 |
+| 30,000 | 59.7 MB | 45,661 | 15,902 | 6.0 / 8.7 | 0.189 | 17,157 | 0.287 | 164.1 | 100.8 |
+| 150,000 | 299.0 MB | 46,449 | 15,675 | 6.2 / 8.4 | 0.762 | 17,047 | 1.557 | 803.8 | 486.3 |
+
+- Verifier memory grows linearly, at about 3.3 KiB per record, because the verifier holds every record in memory (audit R4).
+- The standalone verifier ran without a trust store, so it exited 1 (authenticity not assessed). That is the designed behaviour.
+- The 3 `clock_drift` flags are correct: the benchmark's sensor times are about 10 days earlier than the station's receipt times.
 
 ## Defect found by the benchmark and fixed
 

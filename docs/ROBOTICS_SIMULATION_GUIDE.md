@@ -94,3 +94,41 @@ Use `RobotAgent` (`python/cursiv_sim/robot.py`): `observation(...)` builds a rec
 unknowns, `record()` signs and fsyncs it, `upload()` sends attachments, `sync()` delivers from the
 bridge's head and sends a checkpoint. Real-hardware agents must set `synthetic=False` and
 `provenance.source="sensor"`, and must state their real time source.
+
+## Virtual missions (deterministic, with seeded failures)
+
+```powershell
+py -m pip install cryptography
+cargo build --release
+$env:PYTHONPATH = "python"
+py -m cursiv_sim.missions run missions\coastal-survey.json --out runs\missions --check
+```
+
+A mission file names a seed, a duration and a list of platforms (`stationary`, `ground`, `underwater`, `aerial`),
+each with sensors and scheduled faults. The clock is simulated, IDs are sequential and keys come from the seed,
+so a run reproduces its `*.expected.json` exactly, signed chain heads included. `--update-expected` rewrites that
+file after an intended change; review the diff before committing it.
+
+| Platform | Simulated behaviour |
+|---|---|
+| stationary (buoy) | fixed position; water temperature, conductivity, dissolved oxygen, pressure |
+| ground (rover) | waypoints with GNSS-like accuracy; soil moisture, air temperature |
+| underwater (AUV) | dive/surface cycle, link only on the surface, dead reckoning whose accuracy worsens until it surfaces, a thermocline relative to the buoy |
+| aerial (drone) | altitude profile with a temperature lapse rate, images as attachments |
+
+| Fault | What it does | Expected handling |
+|---|---|---|
+| `sensor_drift` | adds a growing bias | readings stay signed; contradiction or range flags where peers disagree |
+| `expired_calibration` | calibration validity ends before the mission | `calibration_expired` on each affected reading |
+| `sensor_dropout` | no readings for a window | `sampling_gap` |
+| `packet_loss`, `corrupt_upload` | uploads lost or bit-flipped | retried; corrupt uploads rejected by the station and resent |
+| `duplicate_send`, `duplicate_reading` | resend an acknowledged record; record identical content twice | idempotent acknowledgement; `duplicate_content` |
+| `clock_step` | the robot's clock jumps | `out_of_order_time` / clock flags |
+| `shutdown`, `station_crash` | robot or station stops mid-mission | queued records survive; restart recovers from disk |
+| `storage_exhaustion` | station restarted with a small quota | 507 `storage_full`; robot keeps its data and retries later |
+
+Every value is labelled synthetic, and every report says so. A mission that passes shows how the
+software behaves under these failures. It says nothing about how real sensors, radios or robots behave.
+
+The one-command demo (`scripts/demo.ps1`, or `python python/cursiv_demo`) runs the coastal survey and then
+continues through tamper detection and import into a research workspace.
