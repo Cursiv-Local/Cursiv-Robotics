@@ -124,7 +124,7 @@ the verifier answers the first two. Observations marked synthetic are simulated,
     }
     w("bagit.txt", "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n")?;
     w("bag-info.txt", &format!(
-        "Bagging-Date: {}\nPayload-Oxum: {octets}.{}\nBag-Software-Agent: cursiv-evidence {}\nExternal-Identifier: {}\n\
+        "Bagging-Date: {}\nPayload-Oxum: {octets}.{}\nBag-Software-Agent: cursiv-evidence {}\nExternal-Identifier: {}\nCursiv-Package-Version: 1\n\
 External-Description: Cursiv Robotics evidence package; verify with cursiv-verify (manifest.json is a DSSE envelope)\n",
         &model::now_utc()[..10], files.len(), env!("CARGO_PKG_VERSION"), store.station_id))?;
     w("manifest-sha256.txt", &bag_manifest)?;
