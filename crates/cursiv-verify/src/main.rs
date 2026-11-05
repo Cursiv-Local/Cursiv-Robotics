@@ -2,6 +2,7 @@
 //!
 //!   cursiv-verify package <dir> [--trust trust.json] [--json] [--science [--profile p.json] [--max-records N]] [--report-md out.md]
 //!   cursiv-verify segment <NNNNNN.jsonl> --trust trust.json [--json]
+//!   cursiv-verify convert <dir> --to prov|sensorthings [--trust trust.json] [--out file.json] [--allow-unverified]
 //!   cursiv-verify cursiv-export <dir> [--key-id <id>] [--json]
 //!
 //! Without --science the package is verified in bounded memory (records are streamed, not kept).
@@ -19,7 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
-    eprintln!("usage:\n  cursiv-verify package <dir> [--trust trust.json] [--json] [--science [--profile p.json] [--max-records N]] [--report-md out.md]\n  cursiv-verify segment <NNNNNN.jsonl> --trust trust.json [--json]\n  cursiv-verify cursiv-export <dir> [--key-id <id>] [--json]");
+    eprintln!("usage:\n  cursiv-verify package <dir> [--trust trust.json] [--json] [--science [--profile p.json] [--max-records N]] [--report-md out.md]\n  cursiv-verify segment <NNNNNN.jsonl> --trust trust.json [--json]\n  cursiv-verify convert <dir> --to prov|sensorthings [--trust trust.json] [--out file.json] [--allow-unverified]\n  cursiv-verify cursiv-export <dir> [--key-id <id>] [--json]");
     ExitCode::from(2)
 }
 
@@ -114,6 +115,45 @@ fn main() -> ExitCode {
                 ExitCode::from(3) // records authentic and complete, but a derived result or finding is invalid
             } else {
                 ExitCode::SUCCESS
+            }
+        }
+        "convert" => {
+            let trust = match flag_value(&args, "--trust").map(|p| TrustStore::load(p.as_ref())) {
+                Some(Ok(t)) => Some(t),
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
+                }
+                None => None,
+            };
+            let allow = args.iter().any(|a| a == "--allow-unverified");
+            let opts = verify::VerifyOptions { collect_records: true, max_collected_records: u64::MAX };
+            let report = verify::verify_package_with(&dir, trust.as_ref(), &opts);
+            let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let out = match flag_value(&args, "--to").as_deref() {
+                Some("prov") => cursiv_evidence::convert::to_prov_json(&report, &name, allow),
+                Some("sensorthings") => cursiv_evidence::convert::to_sensorthings(&report, &name, allow),
+                _ => return usage(),
+            };
+            match out {
+                Err(e) => {
+                    eprintln!("not converted: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(v) => {
+                    let text = serde_json::to_string_pretty(&v).unwrap();
+                    match flag_value(&args, "--out") {
+                        Some(p) => {
+                            if let Err(e) = std::fs::write(&p, text + "\n") {
+                                eprintln!("cannot write {p}: {e}");
+                                return ExitCode::from(2);
+                            }
+                            eprintln!("wrote {p} (verification status: {})", report.status);
+                        }
+                        None => println!("{text}"),
+                    }
+                    ExitCode::SUCCESS
+                }
             }
         }
         "segment" => {
