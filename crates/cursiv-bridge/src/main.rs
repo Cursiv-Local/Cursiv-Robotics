@@ -226,12 +226,17 @@ impl App {
             }
             (Method::Post, ["v1", "exports"]) => {
                 let body = match read_body(req, 4096) { Ok(b) => b, Err(r) => return r };
-                let name = serde_json::from_slice::<serde_json::Value>(&body).ok().and_then(|v| v["name"].as_str().map(String::from)).unwrap_or_default();
+                let req_v = serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default();
+                let name = req_v["name"].as_str().map(String::from).unwrap_or_default();
+                let format = req_v["format"].as_u64().unwrap_or(cursiv_evidence::package::PACKAGE_VERSION as u64) as u32;
+                if !cursiv_evidence::package::SUPPORTED_PACKAGE_VERSIONS.contains(&format) {
+                    return err(400, "bad_format", "format must be 1 or 2");
+                }
                 if !model::valid_id(&name) {
                     return err(400, "bad_name", "export name must be 1-64 of [a-z0-9._-]");
                 }
                 let dest = self.exports.join(&name);
-                match match self.store() { Ok(g) => g, Err(r) => return r }.export(&dest) {
+                match match self.store() { Ok(mut g) => g.export_with(&dest, cursiv_evidence::package::ExportOptions { format }), Err(r) => return r } {
                     Ok(v) => json(201, v),
                     Err(e) => err(409, "export_failed", &e),
                 }

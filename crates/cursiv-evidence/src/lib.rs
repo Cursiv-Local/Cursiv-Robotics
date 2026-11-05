@@ -12,6 +12,7 @@ pub mod model;
 pub mod package;
 pub mod reasoning;
 pub mod science;
+pub mod segment;
 pub mod store;
 pub mod trust;
 pub mod units;

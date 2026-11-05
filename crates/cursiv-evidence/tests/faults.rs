@@ -114,7 +114,7 @@ impl Lab {
         }
     }
 
-    fn export(&self, name: &str) -> PathBuf {
+    fn export(&mut self, name: &str) -> PathBuf {
         let p = self.dir.join(name);
         self.store.export(&p).unwrap();
         p
@@ -176,7 +176,7 @@ fn fault_1_altered_measurement_is_detected() {
     let mut l = lab("altered");
     l.survey(5);
     let p = l.export("pkg");
-    rewrite_line(&p.join("data/robots/rover-02/records.jsonl"), 2, |line| line.replace("14.2", "19.2"));
+    rewrite_line(&p.join("data/robots/rover-02/segments/000001.jsonl"), 2, |line| line.replace("14.2", "19.2"));
     let r = l.verify(&p);
     assert_eq!(r.verdicts.integrity, "fail");
     let c = codes(&r);
@@ -208,7 +208,7 @@ fn fault_3_missing_observation_is_detected_by_chain_and_checkpoint() {
     let mut l = lab("missing");
     l.survey(6);
     let p = l.export("pkg");
-    let f = p.join("data/robots/rover-01/records.jsonl");
+    let f = p.join("data/robots/rover-01/segments/000001.jsonl");
     let text = fs::read_to_string(&f).unwrap();
     let kept: Vec<&str> = text.lines().enumerate().filter(|(i, _)| *i != 3).map(|(_, l)| l).collect();
     fs::write(&f, kept.join("\n") + "\n").unwrap();
@@ -220,7 +220,7 @@ fn fault_3_missing_observation_is_detected_by_chain_and_checkpoint() {
     let mut l2 = lab("missing-tail");
     l2.survey(6);
     let p2 = l2.export("pkg");
-    let f2 = p2.join("data/robots/rover-01/records.jsonl");
+    let f2 = p2.join("data/robots/rover-01/segments/000001.jsonl");
     let t2 = fs::read_to_string(&f2).unwrap();
     fs::write(&f2, t2.lines().take(5).collect::<Vec<_>>().join("\n") + "\n").unwrap();
     let r2 = l2.verify(&p2);
@@ -261,7 +261,7 @@ fn faults_10_11_corrupted_export_and_rebuilt_chain() {
     // manifest with their own keys. Internally consistent; must not pass authenticity.
     let p = l.export("pkg-rebuilt");
     let attacker = Identity::from_seed([66u8; 32]);
-    let f = p.join("data/robots/rover-03/records.jsonl");
+    let f = p.join("data/robots/rover-03/segments/000001.jsonl");
     let mut prev = GENESIS.to_string();
     let mut out = String::new();
     let mut hashes = vec![];
@@ -345,7 +345,7 @@ fn faults_13_14_partial_sync_restart_recovery_and_fork_detection() {
     let out = l.store.ingest_batch(&[envs[0].clone(), envs[1].clone(), envs[4].clone()]).unwrap();
     assert!(matches!(out[2], Outcome::Rejected { ref code, expected_seq: Some(3), .. } if code == "gap"));
     // 14: station restarts mid-write: torn final line
-    let f = l.dir.join("store/robots/rover-01/records.jsonl");
+    let f = l.dir.join("store/robots/rover-01/segments/000001.jsonl");
     let mut text = fs::read_to_string(&f).unwrap();
     text.push_str("{\"payload\":\"{\\\"schema\\\":");
     fs::write(&f, text).unwrap();
@@ -543,8 +543,9 @@ fn finding(r: &Robot, n: u64, epistemic: &str, author_kind: &str, supports: &[&O
     o
 }
 
-fn reason(l: &Lab, name: &str) -> (verify::Report, cursiv_evidence::reasoning::ReasoningReport) {
-    let rep = l.verify(&l.export(name));
+fn reason(l: &mut Lab, name: &str) -> (verify::Report, cursiv_evidence::reasoning::ReasoningReport) {
+    let p = l.export(name);
+    let rep = l.verify(&p);
     let sci = science::validate(&rep.records, &rep.receipts, &Profile::survey_default());
     let rs = cursiv_evidence::reasoning::analyse(&rep.records, Some(&sci));
     (rep, rs)
@@ -569,7 +570,7 @@ fn a_validly_signed_but_wrong_derived_result_is_caught_by_recomputation() {
     for o in l.store.ingest_batch(&envs).unwrap() {
         assert!(matches!(o, Outcome::Accepted { .. }), "{o:?}");
     }
-    let (rep, rs) = reason(&l, "pkg");
+    let (rep, rs) = reason(&mut l, "pkg");
     assert_eq!(rep.verdicts.integrity, "pass", "a wrong result can be perfectly signed: integrity is not correctness");
     assert_eq!(rs.derivations["verified"], 2);
     assert_eq!(rs.derivations["mismatch"], 1);
@@ -608,7 +609,7 @@ fn findings_are_checked_against_the_evidence_they_cite() {
     nameless.claim.as_mut().unwrap().model = None;
     let e = analyst.record(nameless);
     assert!(matches!(l.store.ingest_batch(&[e]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "invalid_observation"));
-    let (_, rs) = reason(&l, "pkg");
+    let (_, rs) = reason(&mut l, "pkg");
     let status: Vec<&str> = rs.findings.iter().map(|f| f.status.as_str()).collect();
     assert_eq!(status, ["well_supported", "invalid", "invalid", "invalid", "supported_with_caveats", "invalid", "unsupported"]);
     for code in ["ai_claim_marked_known", "unsupported_claim", "citation_missing", "citation_superseded", "synthetic_propagation"] {
@@ -640,7 +641,7 @@ fn storage_quota_refuses_cleanly_and_nothing_changes() {
 fn a_failed_write_stops_the_store_and_restart_recovers_from_disk() {
     let mut l = lab("failstop");
     l.survey(3);
-    let f = l.dir.join("store/robots/rover-01/records.jsonl");
+    let f = l.dir.join("store/robots/rover-01/segments/000001.jsonl");
     let aside = l.dir.join("aside.jsonl");
     fs::rename(&f, &aside).unwrap();
     fs::create_dir(&f).unwrap(); // the next append cannot open the file: an I/O failure
@@ -727,7 +728,8 @@ fn units_duplicates_gaps_and_timestamps_are_checked() {
     let mut all = envs.to_vec();
     all.push(e);
     l.store.ingest_batch(&all).unwrap();
-    let rep = l.verify(&l.export("pkg"));
+    let p = l.export("pkg");
+    let rep = l.verify(&p);
     let mut prof = Profile::survey_default();
     prof.types.get_mut("air_temperature").unwrap().expected_interval_s = Some(60.0);
     let s = science::validate(&rep.records, &rep.receipts, &prof);
@@ -766,7 +768,7 @@ fn derived_uncertainty_is_propagated_and_checked() {
         envs.push(r.record(o));
     }
     l.store.ingest_batch(&envs).unwrap();
-    let (_, rs) = reason(&l, "pkg");
+    let (_, rs) = reason(&mut l, "pkg");
     assert_eq!(rs.derivations["verified"], 3, "the values all match");
     assert_eq!(rs.derivations["uncertainty_verified"], 1);
     assert!(rs.flags.iter().any(|f| f.code == "uncertainty_mismatch"));

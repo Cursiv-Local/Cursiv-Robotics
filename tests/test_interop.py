@@ -19,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
+from cursiv_integration.layout import record_files, record_lines  # noqa: E402
 from cursiv_sim.lab import Lab  # noqa: E402
 from cursiv_sim.robot import RobotAgent  # noqa: E402
 from cursiv_sim.rovers import ROVERS  # noqa: E402
@@ -52,7 +53,7 @@ def test_package_is_a_valid_bagit_bag_and_tampering_breaks_fixity(package, tmp_p
     import shutil
     copy = tmp_path / "bag"
     shutil.copytree(pkg, copy)
-    f = copy / "data/robots/rover-01/records.jsonl"
+    f = record_files(copy, "rover-01")[0]
     f.write_bytes(f.read_bytes().replace(b"A", b"B", 1))
     with pytest.raises(bagit.BagValidationError):
         bagit.Bag(str(copy)).validate()
@@ -70,7 +71,7 @@ def test_records_are_standard_dsse_envelopes(package):
         k = trust["robots"][rid][0]
         key = SSlibKey(keyid=k["key_id"], keytype="ed25519", scheme="ed25519",
                        keyval={"public": base64.b64decode(k["public_key"]).hex()})
-        for line in (pkg / f"data/robots/{rid}/records.jsonl").read_text().splitlines():
+        for line in record_lines(pkg, rid):
             env = Envelope.from_dict(json.loads(line))
             assert list(env.verify([key], 1)) == [k["key_id"]]
     station = trust["stations"][lab.station_id][0]
@@ -130,7 +131,7 @@ def test_ros2_mcap_recording_is_imported_traceably_and_verifies(tmp_path):
         code, rep = lab.verify(pkg)
         assert code == 0, rep["verification"]["findings"][:3]
         from cursiv_sim.identity import body_json
-        obs = [body_json(json.loads(l))["observation"] for l in (pkg / "data/robots/rover-04/records.jsonl").read_text().splitlines()]
+        obs = [body_json(json.loads(l))["observation"] for l in record_lines(pkg, "rover-04")]
         assert obs[0]["location"] is None and obs[0]["measurement"]["uncertainty"] is None, "no fix yet; ROS variance 0 = unknown"
         assert obs[1]["location"]["horizontal_accuracy_m"] == 2.0 and obs[1]["measurement"]["value"] == pytest.approx(15.6)
         src = [a for a in obs[1]["attachments"] if a["role"] == "source_recording"][0]
@@ -164,6 +165,6 @@ def test_qartod_flags_a_spike_on_verified_data_and_refuses_unverified(package, t
     import shutil
     bad = tmp_path / "bad"
     shutil.copytree(pkg, bad)
-    f = bad / "data/robots/rover-02/records.jsonl"
+    f = record_files(bad, "rover-02")[0]
     f.write_text(f.read_text().replace("A", "B", 1))
     assert "refused" in qartod.run(bad, lab.trust_path)

@@ -1,8 +1,10 @@
 //! Durable evidence store: one append-only, robot-signed log per robot, a
 //! content-addressed attachment store, and the station's receipt ledger.
 //!
-//! Layout under the store root:
-//!   robots/<robot_id>/records.jsonl      robot-signed envelopes (Record payloads), seq 1..n
+//! Layout under the store root (store format 2):
+//!   store-format.json                    {"format": 2}
+//!   robots/<robot_id>/segments/NNNNNN.jsonl      robot-signed envelopes (Record payloads), in order
+//!   robots/<robot_id>/segments/NNNNNN.seal.json  station seal of a full segment (see `segment`)
 //!   robots/<robot_id>/checkpoints.jsonl  robot-signed Checkpoint envelopes
 //!   receipts.jsonl                       station receipt chain (when each record arrived)
 //!   incidents.jsonl                      rejected or suspicious submissions (no payloads)
@@ -11,14 +13,21 @@
 //! Each robot's log is separate, so robots never contend for one serialized
 //! chain (Cursiv's notebook keeps one chain per device and rereads it on every
 //! append; that does not scale to sensor streams).
+//!
+//! Memory: per record the store keeps a 32-byte hash and a 16-byte observation-id fingerprint,
+//! never the record itself; Merkle roots are maintained incrementally.
+//!
+//! Format 1 stores (one `records.jsonl` per robot) are migrated on open by renaming that file
+//! to `segments/000001.jsonl`: the bytes are unchanged, and the rename is atomic and idempotent.
 
 use crate::crypto::{is_sha256_hex, sha256_hex, Envelope, Identity};
-use crate::merkle;
+use crate::merkle::{self, Frontier};
 use crate::model::{self, Checkpoint, Record, GENESIS, RECORD_SCHEMA, CHECKPOINT_SCHEMA};
+use crate::segment::{self, Seal};
 use crate::trust::{KeyVerdict, TrustStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -95,16 +104,98 @@ impl Outcome {
     }
 }
 
-#[derive(Default, Clone)]
+pub const STORE_FORMAT: u64 = 2;
+
+/// 16-byte fingerprint of an observation id (collision chance negligible: 2^-64 at 4 billion ids).
+pub(crate) fn id_fingerprint(id: &str) -> u128 {
+    let d = Sha256::digest(id.as_bytes());
+    u128::from_be_bytes(d[..16].try_into().unwrap())
+}
+
+pub(crate) fn hash_bytes(hex_hash: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    if let Ok(b) = hex::decode(hex_hash) {
+        if b.len() == 32 {
+            out.copy_from_slice(&b);
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+struct ActiveSegment {
+    number: u64,
+    first_seq: u64,
+    records: u64,
+    bytes: u64,
+    prev_hash: String,
+    hasher: Sha256,
+    frontier: Frontier,
+}
+
+#[derive(Clone)]
 struct RobotState {
-    hashes: Vec<String>,
-    observation_ids: HashSet<String>,
+    /// payload hash of every record, by seq - 1
+    hashes: Vec<[u8; 32]>,
+    head: String,
+    log: Frontier,
+    /// Merkle frontier of the records written to disk (lags `log` only inside ingest_batch)
+    disk: Frontier,
+    observation_ids: HashSet<u128>,
     missions: BTreeMap<String, u64>,
+    keyids: BTreeSet<String>,
+    active: ActiveSegment,
+    /// payload hash of the last seal ("genesis" before the first)
+    last_seal: String,
+}
+
+impl Default for RobotState {
+    fn default() -> Self {
+        RobotState {
+            hashes: Vec::new(), head: GENESIS.into(), log: Frontier::new(), disk: Frontier::new(), observation_ids: HashSet::new(),
+            missions: BTreeMap::new(), keyids: BTreeSet::new(), last_seal: GENESIS.into(),
+            active: ActiveSegment { number: 1, first_seq: 1, records: 0, bytes: 0, prev_hash: GENESIS.into(), hasher: Sha256::new(), frontier: Frontier::new() },
+        }
+    }
 }
 
 impl RobotState {
     fn head(&self) -> String {
-        self.hashes.last().cloned().unwrap_or_else(|| GENESIS.to_string())
+        self.head.clone()
+    }
+    fn count(&self) -> u64 {
+        self.hashes.len() as u64
+    }
+    /// Merkle root over records 1..=n (n <= count). O(log n) for the current count, O(n) otherwise.
+    fn root_at(&self, n: u64) -> String {
+        if n == self.count() {
+            return self.log.root();
+        }
+        let hs: Vec<String> = self.hashes[..n as usize].iter().map(hex::encode).collect();
+        merkle::root(&hs)
+    }
+    fn accept(&mut self, hash: &str, obs_id: &str, mission: &str, keyid: &str) {
+        self.hashes.push(hash_bytes(hash));
+        self.log.push(hash);
+        self.head = hash.to_string();
+        self.observation_ids.insert(id_fingerprint(obs_id));
+        *self.missions.entry(mission.to_string()).or_default() += 1;
+        if !self.keyids.contains(keyid) {
+            self.keyids.insert(keyid.to_string());
+        }
+    }
+}
+
+/// Segment rotation limits (whichever is reached first).
+#[derive(Clone, Copy, Debug)]
+pub struct SegmentLimits {
+    pub records: u64,
+    pub bytes: u64,
+}
+
+impl Default for SegmentLimits {
+    fn default() -> Self {
+        SegmentLimits { records: segment::DEFAULT_SEGMENT_RECORDS, bytes: segment::DEFAULT_SEGMENT_BYTES }
     }
 }
 
@@ -114,8 +205,10 @@ pub struct Store {
     station: Identity,
     trust: TrustStore,
     robots: BTreeMap<String, RobotState>,
-    receipt_hashes: Vec<String>,
+    receipts: Frontier,
+    receipt_head: String,
     pub recovery_notes: Vec<String>,
+    pub segment_limits: SegmentLimits,
     pub max_attachment_bytes: u64,
     /// Set after a failed write. In-memory state may then be ahead of disk, so every further
     /// write is refused until the service restarts and rebuilds its state from disk.
@@ -139,44 +232,90 @@ fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()> {
     f.sync_data()
 }
 
-/// Read a JSONL file; a torn final line (crash mid-write) is cut off and reported.
-/// Any other unreadable line is a hard error: the store will not start over corruption.
-fn read_jsonl_recovering<T: for<'de> Deserialize<'de>>(path: &Path, notes: &mut Vec<String>) -> Result<Vec<T>, String> {
-    let Ok(f) = File::open(path) else { return Ok(Vec::new()) };
-    let mut reader = BufReader::new(f);
-    let mut out = Vec::new();
+fn append_refs(path: &Path, lines: &[&String]) -> std::io::Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut buf = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
+    for l in lines {
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    f.write_all(buf.as_bytes())?;
+    f.sync_data()
+}
+
+fn make_seal(station_id: &str, rid: &str, active: &ActiveSegment, last_hash: &str, last_seq: u64, disk: &Frontier, prev_seal: &str) -> Seal {
+    Seal {
+        schema: segment::SEAL_SCHEMA.into(), station_id: station_id.into(), robot_id: rid.into(), segment: active.number,
+        first_seq: active.first_seq, last_seq, prev_hash: active.prev_hash.clone(), last_hash: last_hash.into(),
+        file_sha256: hex::encode(active.hasher.clone().finalize()), file_size: active.bytes,
+        segment_merkle_root: active.frontier.root(), log_merkle_root: disk.root(), prev_seal: prev_seal.into(), sealed_time: model::now_utc(),
+    }
+}
+
+fn write_seal(station: &Identity, segdir: &Path, seal: &Seal) -> std::io::Result<String> {
+    let env = segment::sign_seal(station, seal);
+    write_atomic(&segdir.join(segment::seal_name(seal.segment)), &serde_json::to_string_pretty(&env).unwrap())?;
+    Ok(segment::seal_hash(&env))
+}
+
+/// Stream a JSONL file line by line. A torn final line (crash mid-write) is cut off and
+/// reported; any other unreadable line is a hard error (the store will not start over
+/// corruption). Returns the SHA-256 and length of the good bytes.
+fn scan_jsonl(path: &Path, notes: &mut Vec<String>, mut each: impl FnMut(&str) -> Result<(), String>) -> Result<(String, u64), String> {
+    let Ok(f) = File::open(path) else { return Ok((hex::encode(Sha256::digest(b"")), 0)) };
+    let mut reader = BufReader::with_capacity(256 * 1024, f);
+    let mut hasher = Sha256::new();
     let mut good_len: u64 = 0;
     let mut line = String::new();
     let mut n = 0;
     loop {
         line.clear();
-        let read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let read = reader.read_line(&mut line).map_err(|e| format!("{}: {e}", path.display()))?;
         if read == 0 {
             break;
         }
         n += 1;
         let complete = line.ends_with('\n');
-        match serde_json::from_str::<T>(line.trim_end()) {
-            Ok(v) if complete => {
-                out.push(v);
+        let parsed = if complete { each(line.trim_end()) } else { Err("incomplete".into()) };
+        match parsed {
+            Ok(()) => {
+                hasher.update(line.as_bytes());
                 good_len += read as u64;
             }
-            _ => {
+            Err(e) => {
                 // Is this the last line? Then it is a torn write.
                 let mut rest = String::new();
                 reader.read_to_string(&mut rest).map_err(|e| e.to_string())?;
-                if rest.trim().is_empty() {
+                if rest.trim().is_empty() && (!complete || e == "unparseable") {
                     let f = OpenOptions::new().write(true).open(path).map_err(|e| e.to_string())?;
                     f.set_len(good_len).map_err(|e| e.to_string())?;
                     f.sync_all().map_err(|e| e.to_string())?;
                     notes.push(format!("{}: removed an incomplete final line {n} (interrupted write)", path.display()));
                     break;
                 }
-                return Err(format!("{}: line {n} is unreadable and is not the last line; refusing to start", path.display()));
+                return Err(format!("{}: line {n}: {e}; refusing to start", path.display()));
             }
         }
     }
-    Ok(out)
+    Ok((hex::encode(hasher.finalize()), good_len))
+}
+
+fn parse_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, String> {
+    serde_json::from_str(line).map_err(|_| "unparseable".to_string())
+}
+
+/// Write a small file atomically (temp file, fsync, rename).
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = unique_tmp(path.parent().unwrap_or(Path::new(".")), ".write");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
 }
 
 impl Store {
@@ -195,53 +334,62 @@ impl Store {
         }
         let mut s = Store {
             root: root.to_path_buf(), station_id: station_id.into(), station, trust,
-            robots: BTreeMap::new(), receipt_hashes: Vec::new(), recovery_notes: Vec::new(),
+            robots: BTreeMap::new(), receipts: Frontier::new(), receipt_head: GENESIS.into(), recovery_notes: Vec::new(),
+            segment_limits: SegmentLimits::default(),
             max_attachment_bytes: 256 * 1024 * 1024,
             failed: None, quota: None, used: Arc::new(AtomicU64::new(0)),
         };
         let mut notes = Vec::new();
+        let format_file = root.join("store-format.json");
+        if let Ok(t) = fs::read_to_string(&format_file) {
+            let v: serde_json::Value = serde_json::from_str(&t).map_err(|_| "store-format.json is unreadable")?;
+            if v["format"].as_u64() != Some(STORE_FORMAT) {
+                return Err(format!("store format {} is not supported by this version (expects {STORE_FORMAT})", v["format"]));
+            }
+        }
         for e in fs::read_dir(root.join("robots")).map_err(|e| e.to_string())?.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !model::valid_id(&name) || !e.path().is_dir() {
                 return Err(format!("unexpected entry robots/{name}"));
             }
-            let envs: Vec<Envelope> = read_jsonl_recovering(&e.path().join("records.jsonl"), &mut notes)?;
-            let mut st = RobotState::default();
-            for (i, env) in envs.iter().enumerate() {
-                let rec: Record = env.body_text().and_then(|t| serde_json::from_str(&t).ok()).ok_or_else(|| format!("robots/{name} record {} unreadable", i + 1))?;
-                if rec.seq != i as u64 + 1 || rec.prev != st.head() || rec.robot_id != name {
-                    return Err(format!("robots/{name}: chain broken at record {}; refusing to start", i + 1));
-                }
-                st.observation_ids.insert(rec.observation.observation_id.clone());
-                *st.missions.entry(rec.observation.mission_id.clone()).or_default() += 1;
-                st.hashes.push(env.payload_hash());
-            }
-            let _: Vec<Envelope> = read_jsonl_recovering(&e.path().join("checkpoints.jsonl"), &mut notes)?;
+            let st = s.load_robot(&name, &e.path(), &mut notes)?;
+            let _ = scan_jsonl(&e.path().join("checkpoints.jsonl"), &mut notes, |l| parse_line::<Envelope>(l).map(|_| ()))?;
             s.robots.insert(name, st);
         }
-        let receipts: Vec<Receipt> = read_jsonl_recovering(&root.join("receipts.jsonl"), &mut notes)?;
-        let mut prev = GENESIS.to_string();
-        for (i, r) in receipts.iter().enumerate() {
-            if r.seq != i as u64 + 1 || r.prev != prev || r.compute_hash() != r.hash {
-                return Err(format!("receipts.jsonl: chain broken at receipt {}; refusing to start", i + 1));
+        // Receipts are streamed: only the chain head, a Merkle frontier and, per robot, the
+        // highest receipted record are kept.
+        let mut receipted: BTreeMap<String, u64> = BTreeMap::new();
+        let (mut prev, mut frontier) = (GENESIS.to_string(), Frontier::new());
+        let mut i = 0u64;
+        scan_jsonl(&root.join("receipts.jsonl"), &mut notes, |l| {
+            let r: Receipt = parse_line(l)?;
+            i += 1;
+            if r.seq != i || r.prev != prev || r.compute_hash() != r.hash {
+                return Err(format!("receipts.jsonl: chain broken at receipt {i}"));
             }
-            prev = r.hash.clone();
-            s.receipt_hashes.push(r.hash.clone());
-        }
+            let m = receipted.entry(r.robot_id.clone()).or_default();
+            *m = (*m).max(r.robot_seq);
+            frontier.push(&r.hash);
+            prev = r.hash;
+            Ok(())
+        })?;
+        s.receipts = frontier;
+        s.receipt_head = prev;
         // A crash between writing a record and its receipt leaves records without receipts.
-        let receipted: HashSet<(String, u64)> = receipts.iter().map(|r| (r.robot_id.clone(), r.robot_seq)).collect();
         let mut late = Vec::new();
         for (rid, st) in &s.robots {
-            for (i, h) in st.hashes.iter().enumerate() {
-                if !receipted.contains(&(rid.clone(), i as u64 + 1)) {
-                    late.push((rid.clone(), i as u64 + 1, h.clone()));
-                }
+            let from = receipted.get(rid).copied().unwrap_or(0);
+            for q in from + 1..=st.count() {
+                late.push((rid.clone(), q, hex::encode(st.hashes[(q - 1) as usize])));
             }
         }
         if !late.is_empty() {
             notes.push(format!("{} record(s) had no receipt after an interruption; receipts added now, marked by their later time", late.len()));
             let lines = late.iter().map(|(r, q, h)| s.next_receipt(r, *q, h)).collect::<Vec<_>>();
             append_lines(&root.join("receipts.jsonl"), &lines).map_err(|e| e.to_string())?;
+        }
+        if !format_file.exists() {
+            write_atomic(&format_file, &format!("{{\"format\": {STORE_FORMAT}}}\n")).map_err(|e| e.to_string())?;
         }
         if !notes.is_empty() {
             for n in &notes {
@@ -251,6 +399,88 @@ impl Store {
         s.recovery_notes = notes;
         s.used.store(tree_bytes(root), Ordering::Relaxed);
         Ok(s)
+    }
+
+    /// Rebuild one robot's state from its segments, migrating a format-1 `records.jsonl` first.
+    fn load_robot(&self, name: &str, dir: &Path, notes: &mut Vec<String>) -> Result<RobotState, String> {
+        let segdir = dir.join("segments");
+        let legacy = dir.join("records.jsonl");
+        if legacy.is_file() {
+            let has_segments = fs::read_dir(&segdir).map(|mut d| d.next().is_some()).unwrap_or(false);
+            if has_segments {
+                return Err(format!("robots/{name} has both records.jsonl and segments/; refusing to guess which is current"));
+            }
+            fs::create_dir_all(&segdir).map_err(|e| e.to_string())?;
+            fs::rename(&legacy, segdir.join(segment::segment_name(1))).map_err(|e| format!("migrating robots/{name}: {e}"))?;
+            notes.push(format!("robots/{name}: format-1 log moved unchanged to segments/000001.jsonl (store format 2)"));
+        }
+        let mut numbers: BTreeMap<u64, (bool, bool)> = BTreeMap::new();
+        if let Ok(rd) = fs::read_dir(&segdir) {
+            for e in rd.flatten() {
+                let fname = e.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".tmp") {
+                    let _ = fs::remove_file(e.path()); // an unfinished seal write
+                    continue;
+                }
+                let Some((n, is_seal)) = segment::parse_name(&fname) else {
+                    return Err(format!("unexpected file robots/{name}/segments/{fname}"));
+                };
+                let entry = numbers.entry(n).or_default();
+                if is_seal { entry.1 = true } else { entry.0 = true }
+            }
+        }
+        let mut st = RobotState::default();
+        let last = numbers.keys().next_back().copied().unwrap_or(0);
+        for (i, (&n, &(has_file, has_seal))) in numbers.iter().enumerate() {
+            if n != i as u64 + 1 || !has_file {
+                return Err(format!("robots/{name}: segment {} is missing; refusing to start", i + 1));
+            }
+            if !has_seal && n != last {
+                return Err(format!("robots/{name}: segment {n} has no seal but is not the last segment"));
+            }
+            let path = segdir.join(segment::segment_name(n));
+            st.active = ActiveSegment { number: n, first_seq: st.count() + 1, records: 0, bytes: 0, prev_hash: st.head(),
+                                        hasher: Sha256::new(), frontier: Frontier::new() };
+            let mut seg_records = 0u64;
+            let mut seg_frontier = Frontier::new();
+            let (sha, size) = scan_jsonl(&path, notes, |l| {
+                let env: Envelope = parse_line(l)?;
+                let rec: Record = env.body_text().and_then(|t| serde_json::from_str(&t).ok()).ok_or_else(|| "unparseable".to_string())?;
+                let q = st.count() + 1;
+                if rec.seq != q || rec.prev != st.head() || rec.robot_id != name {
+                    return Err(format!("chain broken at record {q}"));
+                }
+                let hash = env.payload_hash();
+                st.accept(&hash, &rec.observation.observation_id, &rec.observation.mission_id, env.keyid());
+                st.active.hasher.update(l.as_bytes());
+                st.active.hasher.update(b"\n");
+                seg_frontier.push(&hash);
+                seg_records += 1;
+                Ok(())
+            })?;
+            if has_seal {
+                let env: Envelope = fs::read_to_string(segdir.join(segment::seal_name(n))).ok()
+                    .and_then(|t| serde_json::from_str(&t).ok()).ok_or(format!("robots/{name}: seal {n} unreadable"))?;
+                let seal = segment::decode(&env).map_err(|e| format!("robots/{name}: seal {n}: {e}"))?;
+                if seal.file_sha256 != sha || seal.file_size != size || seal.last_seq != st.count() || seal.prev_seal != st.last_seal {
+                    return Err(format!("robots/{name}: segment {n} differs from its seal; refusing to start"));
+                }
+                st.last_seal = segment::seal_hash(&env);
+                st.active = ActiveSegment { number: n + 1, first_seq: st.count() + 1, records: 0, bytes: 0, prev_hash: st.head(),
+                                            hasher: Sha256::new(), frontier: Frontier::new() };
+            } else {
+                st.active.records = seg_records;
+                st.active.bytes = size;
+                st.active.frontier = seg_frontier;
+            }
+        }
+        st.disk = st.log.clone();
+        Ok(st)
+    }
+
+    /// Records per segment and bytes per segment before rotation.
+    pub fn set_segment_limits(&mut self, limits: SegmentLimits) {
+        self.segment_limits = SegmentLimits { records: limits.records.max(1), bytes: limits.bytes.max(1) };
     }
 
     /// Refuse writes that would take the store past `bytes` (HTTP 507), before anything changes.
@@ -294,8 +524,8 @@ impl Store {
     fn next_receipt(&mut self, robot_id: &str, robot_seq: u64, record_hash: &str) -> String {
         let mut r = Receipt {
             schema: RECEIPT_SCHEMA.into(),
-            seq: self.receipt_hashes.len() as u64 + 1,
-            prev: self.receipt_hashes.last().cloned().unwrap_or_else(|| GENESIS.into()),
+            seq: self.receipts.count() + 1,
+            prev: self.receipt_head.clone(),
             station_id: self.station_id.clone(),
             robot_id: robot_id.into(),
             robot_seq,
@@ -304,7 +534,8 @@ impl Store {
             hash: String::new(),
         };
         r.hash = r.compute_hash();
-        self.receipt_hashes.push(r.hash.clone());
+        self.receipts.push(&r.hash);
+        self.receipt_head = r.hash.clone();
         serde_json::to_string(&r).unwrap()
     }
 
@@ -353,12 +584,12 @@ impl Store {
         }
         let hash = env.payload_hash();
         let st = self.robots.entry(rec.robot_id.clone()).or_default();
-        let count = st.hashes.len() as u64;
+        let count = st.count();
         if rec.seq == 0 {
             return Err(Outcome::reject("malformed", "seq starts at 1"));
         }
         if rec.seq <= count {
-            if st.hashes[(rec.seq - 1) as usize] == hash {
+            if st.hashes[(rec.seq - 1) as usize] == hash_bytes(&hash) {
                 return Err(Outcome::Duplicate { robot_id: rec.robot_id, seq: rec.seq, record_hash: hash });
             }
             return Err(Outcome::reject("equivocation", format!(
@@ -371,17 +602,15 @@ impl Store {
         if rec.prev != st.head() {
             return Err(Outcome::reject("chain_mismatch", "prev does not equal the hash of the robot's previous record"));
         }
-        if st.observation_ids.contains(&rec.observation.observation_id) {
+        if st.observation_ids.contains(&id_fingerprint(&rec.observation.observation_id)) {
             return Err(Outcome::reject("duplicate_observation_id", format!("observation_id {} was already recorded with different content", rec.observation.observation_id)));
         }
         if let Some(c) = &rec.observation.correction {
-            if !st.observation_ids.contains(&c.corrects_observation_id) {
+            if !st.observation_ids.contains(&id_fingerprint(&c.corrects_observation_id)) {
                 return Err(Outcome::reject("unknown_correction_target", format!("no earlier observation {} from {}", c.corrects_observation_id, rec.robot_id)));
             }
         }
-        st.hashes.push(hash.clone());
-        st.observation_ids.insert(rec.observation.observation_id.clone());
-        *st.missions.entry(rec.observation.mission_id.clone()).or_default() += 1;
+        st.accept(&hash, &rec.observation.observation_id, &rec.observation.mission_id, env.keyid());
         Ok((rec, hash))
     }
 
@@ -426,8 +655,7 @@ impl Store {
         // Any write failure (disk full, I/O error) stops the store: memory is now ahead of disk.
         let written: u64 = per_robot.values().flatten().chain(receipts.iter()).map(|l| l.len() as u64 + 1).sum();
         for (rid, lines) in &per_robot {
-            let dir = self.root.join("robots").join(rid);
-            if let Err(e) = fs::create_dir_all(&dir).and_then(|_| append_lines(&dir.join("records.jsonl"), lines)) {
+            if let Err(e) = self.append_records(rid, lines) {
                 return Err(self.fail(format!("write failed for {rid}: {e}")));
             }
         }
@@ -457,14 +685,13 @@ impl Store {
         if let Err(o) = self.check_key(&cp.robot_id, env, None) {
             return o;
         }
-        let st = self.robots.get(&cp.robot_id).cloned().unwrap_or_default();
-        let have = st.hashes.len() as u64;
-        if cp.count <= have && cp.count > 0 {
-            let n = cp.count as usize;
-            if st.hashes[n - 1] != cp.head || merkle::root(&st.hashes[..n]) != cp.merkle_root {
-                self.incident("equivocation", Some(&cp.robot_id), "checkpoint disagrees with received records");
-                return Outcome::reject("equivocation", "checkpoint head or Merkle root disagrees with the records received");
-            }
+        let disagrees = self.robots.get(&cp.robot_id).is_some_and(|st| {
+            let n = cp.count;
+            n > 0 && n <= st.count() && (hex::encode(st.hashes[(n - 1) as usize]) != cp.head || st.root_at(n) != cp.merkle_root)
+        });
+        if disagrees {
+            self.incident("equivocation", Some(&cp.robot_id), "checkpoint disagrees with received records");
+            return Outcome::reject("equivocation", "checkpoint head or Merkle root disagrees with the records received");
         }
         let dir = self.root.join("robots").join(&cp.robot_id);
         if fs::create_dir_all(&dir).is_err()
@@ -488,12 +715,86 @@ impl Store {
     }
 
     pub fn robot_count(&self, robot_id: &str) -> u64 {
-        self.robots.get(robot_id).map_or(0, |s| s.hashes.len() as u64)
+        self.robots.get(robot_id).map_or(0, |s| s.count())
+    }
+
+    /// Key ids seen in a robot's records (for the package's informational key list).
+    pub(crate) fn robot_keyids(&self, robot_id: &str) -> Vec<String> {
+        self.robots.get(robot_id).map(|s| s.keyids.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    pub(crate) fn robot_ids(&self) -> Vec<String> {
+        self.robots.keys().cloned().collect()
+    }
+
+    /// Append accepted record lines to a robot's active segment, sealing and rotating it when
+    /// it reaches the segment limits. Each segment write is fsynced; seals are written atomically.
+    fn append_records(&mut self, rid: &str, lines: &[String]) -> std::io::Result<()> {
+        let segdir = self.root.join("robots").join(rid).join("segments");
+        fs::create_dir_all(&segdir)?;
+        let limits = self.segment_limits;
+        let station_id = self.station_id.clone();
+        let Some(st) = self.robots.get_mut(rid) else { return Ok(()) };
+        // admit() already advanced the in-memory log; these are its last `lines.len()` records.
+        let first_new = st.count() - lines.len() as u64 + 1;
+        let mut chunk: Vec<&String> = Vec::new();
+        for (k, line) in lines.iter().enumerate() {
+            let seq = first_new + k as u64;
+            let len = line.len() as u64 + 1;
+            if st.active.records > 0 && (st.active.records >= limits.records || st.active.bytes + len > limits.bytes) {
+                append_refs(&segdir.join(segment::segment_name(st.active.number)), &chunk)?;
+                chunk.clear();
+                let last_hash = hex::encode(st.hashes[(seq - 2) as usize]);
+                let seal = make_seal(&station_id, rid, &st.active, &last_hash, seq - 1, &st.disk, &st.last_seal);
+                st.last_seal = write_seal(&self.station, &segdir, &seal)?;
+                st.active = ActiveSegment { number: st.active.number + 1, first_seq: seq, records: 0, bytes: 0, prev_hash: last_hash,
+                                            hasher: Sha256::new(), frontier: Frontier::new() };
+            }
+            let h = hex::encode(st.hashes[(seq - 1) as usize]);
+            st.active.hasher.update(line.as_bytes());
+            st.active.hasher.update(b"\n");
+            st.active.frontier.push(&h);
+            st.disk.push(&h);
+            st.active.records += 1;
+            st.active.bytes += len;
+            chunk.push(line);
+        }
+        append_refs(&segdir.join(segment::segment_name(st.active.number)), &chunk)
+    }
+
+    /// Seal every robot's active segment (if it has records), so that everything stored so far is
+    /// covered by seals. Called before an export; new records start a new segment.
+    pub fn seal_active_segments(&mut self) -> Result<(), String> {
+        if let Some(f) = &self.failed {
+            return Err(f.clone());
+        }
+        let station_id = self.station_id.clone();
+        let mut failure = None;
+        for (rid, st) in self.robots.iter_mut() {
+            if st.active.records == 0 {
+                continue;
+            }
+            let segdir = self.root.join("robots").join(rid).join("segments");
+            let seal = make_seal(&station_id, rid, &st.active, &st.head, st.count(), &st.disk, &st.last_seal);
+            match write_seal(&self.station, &segdir, &seal) {
+                Ok(h) => st.last_seal = h,
+                Err(e) => {
+                    failure = Some(format!("sealing a segment of {rid} failed: {e}"));
+                    break;
+                }
+            }
+            st.active = ActiveSegment { number: st.active.number + 1, first_seq: st.count() + 1, records: 0, bytes: 0, prev_hash: st.head.clone(),
+                                        hasher: Sha256::new(), frontier: Frontier::new() };
+        }
+        match failure {
+            Some(f) => Err(self.fail(f)),
+            None => Ok(()),
+        }
     }
 
     pub fn status(&self) -> serde_json::Value {
         let robots: BTreeMap<_, _> = self.robots.iter().map(|(id, s)| {
-            (id.clone(), serde_json::json!({"records": s.hashes.len(), "head": s.head(), "missions": s.missions}))
+            (id.clone(), serde_json::json!({"records": s.count(), "head": s.head(), "missions": s.missions, "segment": s.active.number}))
         }).collect();
         let mut missions: BTreeMap<String, u64> = BTreeMap::new();
         for s in self.robots.values() {
@@ -502,28 +803,46 @@ impl Store {
             }
         }
         serde_json::json!({"station_id": self.station_id, "robots": robots, "missions": missions,
-                           "receipts": self.receipt_hashes.len(), "recovery_notes": self.recovery_notes})
+                           "receipts": self.receipts.count(), "recovery_notes": self.recovery_notes, "store_format": STORE_FORMAT})
     }
 
     /// Station-signed checkpoint over every robot log and the receipt chain.
     pub fn station_checkpoint(&self) -> Envelope {
         let robots: BTreeMap<_, _> = self.robots.iter().map(|(id, s)| {
-            (id.clone(), serde_json::json!({"count": s.hashes.len(), "head": s.head(), "merkle_root": merkle::root(&s.hashes)}))
+            (id.clone(), serde_json::json!({"count": s.count(), "head": s.head(), "merkle_root": s.log.root()}))
         }).collect();
         self.station.sign_json(crate::crypto::STATION_CHECKPOINT_TYPE, &serde_json::json!({
             "schema": "cursiv-station-checkpoint-1",
             "station_id": self.station_id,
             "signed_time": model::now_utc(),
             "robots": robots,
-            "receipts": {"count": self.receipt_hashes.len(),
-                         "head": self.receipt_hashes.last().cloned().unwrap_or_else(|| GENESIS.into()),
-                         "merkle_root": merkle::root(&self.receipt_hashes)},
+            "receipts": {"count": self.receipts.count(),
+                         "head": self.receipt_head,
+                         "merkle_root": self.receipts.root()},
         }))
     }
 
-    /// Write a self-contained evidence package to `dest` (must not exist).
-    pub fn export(&self, dest: &Path) -> Result<serde_json::Value, String> {
-        crate::package::export(self, dest, &self.station)
+    /// Write a self-contained evidence package to `dest` (must not exist), in package format 2
+    /// (segmented). Seals the active segments first.
+    pub fn export(&mut self, dest: &Path) -> Result<serde_json::Value, String> {
+        self.export_with(dest, crate::package::ExportOptions::default())
+    }
+
+    /// Export with options, e.g. package format 1 for older verifiers and importers.
+    pub fn export_with(&mut self, dest: &Path, opts: crate::package::ExportOptions) -> Result<serde_json::Value, String> {
+        self.seal_active_segments()?;
+        crate::package::export(self, dest, &self.station, opts)
+    }
+
+    /// Segment files of a robot, in order (all sealed after `seal_active_segments`).
+    pub(crate) fn segment_files(&self, robot_id: &str) -> Vec<(u64, PathBuf, Option<PathBuf>)> {
+        let segdir = self.root.join("robots").join(robot_id).join("segments");
+        let last = self.robots.get(robot_id).map_or(0, |s| s.active.number);
+        (1..=last).filter_map(|n| {
+            let f = segdir.join(segment::segment_name(n));
+            let seal = segdir.join(segment::seal_name(n));
+            f.is_file().then(|| (n, f, seal.is_file().then_some(seal)))
+        }).collect()
     }
 }
 
