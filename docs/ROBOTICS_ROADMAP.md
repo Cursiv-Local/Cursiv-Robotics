@@ -2,6 +2,10 @@
 
 Documented, not implemented. The order reflects what real deployments need first.
 
+## Done since the first milestone
+
+- Real data without hardware: phone recordings (phyphox) to signed evidence and a research dossier for Cursiv (`docs/PHONE_GUIDE.md`). Format fixtures follow phyphox's exporter; a real export from the owner's phone is the next validation.
+
 ## Next milestone (recommended)
 
 **One real sensor, end to end, on Windows and a Raspberry Pi.** For example a USB or I²C temperature or

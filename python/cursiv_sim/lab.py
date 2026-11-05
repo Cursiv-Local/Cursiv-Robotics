@@ -58,9 +58,14 @@ class Lab:
         trust = {"format": "cursiv-trust-1", "robots": {},
                  "stations": {self.station_id: [{"key_id": station["key_id"], "public_key": station["public_key"], "status": "active",
                                                  "note": "simulation station", "valid_from_seq": None, "valid_until_seq": None}]}}
+        if self.trust_path.exists():          # keep robots enrolled earlier (their past records must stay authentic)
+            trust["robots"].update(json.loads(self.trust_path.read_text()).get("robots", {}))
         for rid in self.robot_ids:
             ident = Identity.load_or_create(self.robot_state / rid / "robot.key")
-            trust["robots"][rid] = [ident.trusted_entry("simulated robot")]
+            keys = trust["robots"].get(rid, [])
+            if not any(k["key_id"] == ident.key_id for k in keys):
+                keys.append(ident.trusted_entry("enrolled by the lab harness"))
+            trust["robots"][rid] = keys
         self.trust_path.write_text(json.dumps(trust, indent=2))
         return trust
 
