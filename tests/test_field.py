@@ -124,3 +124,23 @@ def test_tampered_recording_attachment_is_caught(tmp_path):
     out = subprocess.run([str(binary("cursiv-verify")), "package", str(pkg), "--trust", str(station / "trust.json"), "--json"],
                          capture_output=True, text=True)
     assert out.returncode == 1 and json.loads(out.stdout)["verification"]["verdicts"]["attachments"] == "fail"
+
+
+def test_iphone_export_format(tmp_path):
+    """phyphox-ios: same layout, but clock times in 16-digit scientific notation, no trailing newline,
+    device.csv with "version"/"deviceModel" and no sensor names (ExperimentExport.swift)."""
+    rows = [[t / 10.0, 1012.0 + t * 0.001] for t in range(50)]
+    data = '"Time (s)","Pressure (hPa)"' + "".join("\n" + ",".join(java_sci(c) for c in r) for r in rows)   # no final newline
+    f = tmp_path / "iphone.zip"
+    with zipfile.ZipFile(f, "w") as z:
+        z.writestr("Raw Data.csv", data)
+        z.writestr("meta/device.csv", '"property","value"\n"version","1.2.1"\n"build","10211"\n"deviceModel","iPhone14,5"\n"deviceBrand","Apple"\n')
+        z.writestr("meta/time.csv", '"event","experiment time","system time","system time text"\n'
+                   f'"START",0.000000000000000E0,{T0 / 1e9:.15f}E9,"2026-11-05 10:00:00.000 UTC+00:00"\n')
+    ex = phyphox.read(f)
+    assert len(ex.sets[0].rows) == 50 and ex.sets[0].rows[-1][1] == pytest.approx(1012.049)
+    assert ex.absolute(1.0) == pytest.approx(T0 + 1.0, abs=1e-3)
+    station = tmp_path / "station"
+    assert field.main(["run", str(f), "--mission", "iphone-1", "--station", str(station), "--no-pdf"]) == 0
+    md = next((station / "reports").iterdir()).joinpath("dossier.md").read_text()
+    assert "Apple iPhone14,5" in md and "phyphox 1.2.1" in md and "2026-11-05T10:00:00.000Z" in md

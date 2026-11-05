@@ -19,6 +19,13 @@ The phone only records; nothing extra is installed on it, and Cursiv Robotics ru
 5. Export with the ⋮ menu, then **Export Data**, then choose **CSV (Comma, decimal point)**. phyphox makes a `.zip`. Other CSV variants also work. Choose the zip, not the "minimal" single CSV: the zip contains the clock mapping (`meta/time.csv`) that turns the recording into real times.
 6. Send the zip to your PC (email, cloud drive, USB cable, or Nearby Share or AirDrop).
 
+### iPhone notes
+
+- Every iPhone since the iPhone 6 has a barometer, so **Pressure** works; **Location (GPS)** needs Location access for phyphox (Settings > Privacy & Security > Location Services > phyphox > While Using).
+- Export: ⋮ (or the share icon) > **Export Data** > **CSV (Comma, decimal point)** > share the `.zip`.
+- To get the zip onto a Windows PC: email it to yourself, save it to **iCloud Drive** or **OneDrive** (both have Windows apps), or connect the iPhone with a cable and copy it in the Windows Files/Apple Devices app. (AirDrop does not work with Windows.)
+- The dossier shows Apple's hardware model id (for example `iPhone14,5`) and no sensor part names: phyphox on iOS does not export them.
+
 ## 2. On the PC (once)
 
 Install Rust (https://rustup.rs) and Python 3.11+, then in PowerShell:

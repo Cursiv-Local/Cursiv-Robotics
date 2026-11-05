@@ -2,7 +2,9 @@
 
 phyphox exports a ZIP with one CSV per data set plus ``meta/device.csv`` (phone and sensor
 names) and ``meta/time.csv`` (experiment time ↔ phone clock at each START/PAUSE). The format
-handled here follows phyphox-android's ``DataExport.java``: quoted header labels such as
+handled here follows phyphox-android's ``DataExport.java`` and phyphox-ios's
+``ExperimentExport.swift``/``ExperimentExportSet.swift`` (iOS: 16-digit scientific clock times,
+no trailing newline, no sensor names in device.csv, and phyphox's unique device id is never written): quoted header labels such as
 ``"Pressure (hPa)"``, values like ``1.013250000E3``, five separator/decimal variants, and
 ``NaN`` for empty cells. A minimal single CSV (no ZIP) is accepted too, but it has no clock
 mapping, so every sensor time is recorded as unknown.
@@ -210,7 +212,8 @@ def import_exports(paths: list[Path], agent, *, max_rate_hz: float = 2.0, max_fi
         source = {"sha256": ex.sha256, "size": ex.size, "media_type": "application/zip" if zipfile.is_zipfile(ex.path) else "text/csv",
                   "role": "source_recording"}
         model = " ".join(v for v in (ex.device.get("deviceBrand") or ex.device.get("deviceManufacturer"), ex.device.get("deviceModel")) if v) or None
-        app = ex.device.get("phyphoxVersion") or ex.device.get("phyphoxBuild") or "unknown version"
+        # phyphox writes its version under "version" (and "build"); iOS and Android share these identifiers
+        app = ex.device.get("version") or ex.device.get("phyphoxVersion") or ex.device.get("build") or "unknown version"
         summary["files"].append({"file": ex.path.name, "sha256": ex.sha256, "device": model, "phyphox": app, "sets": [d.name for d in ex.sets],
                                  "time_reference": bool(ex.time_events), "notes": ex.notes})
         summary["notes"] += [f"{ex.path.name}: {n}" for n in ex.notes]
