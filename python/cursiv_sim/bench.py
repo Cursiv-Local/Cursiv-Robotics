@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from .identity import sha256_hex
+from .identity import body, sha256_hex
 from .lab import Lab, binary
 from .robot import RobotAgent
 
@@ -94,7 +94,7 @@ def run_scale(out: Path, n_agents: int, per: int) -> dict:
     stored = sum(lab.client.get(f"/v1/robots/{g.robot_id}/head")[1]["count"] for g in agents)
     stats = proc_stats(lab.proc.pid)
     store_bytes = du(lab.dir / "store")
-    payload_bytes = sum(len(e["payload"]) for g in agents for e in g.envelopes)
+    payload_bytes = sum(len(body(e)) for g in agents for e in g.envelopes)
     t0 = time.perf_counter()
     pkg = lab.export("bench")
     export_s = time.perf_counter() - t0

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 from cursiv_sim import demo, faults  # noqa: E402
-from cursiv_sim.identity import Identity, merkle_root, payload_hash  # noqa: E402
+from cursiv_sim.identity import Identity, body_json, merkle_root, pae, payload_hash  # noqa: E402
 from cursiv_sim.lab import Lab, binary  # noqa: E402
 from cursiv_sim.robot import RobotAgent  # noqa: E402
 from cursiv_sim.ros2_adapter import location_from_navsatfix, observation_from_ros  # noqa: E402
@@ -46,7 +46,11 @@ def test_python_and_rust_merkle_roots_agree(tmp_path, lab):
                                value=1.0, unit="degC", uncertainty=0.1, lat=45.1, lon=-122.2))
     g.sync()                      # the bridge recomputes the root in Rust and rejects a mismatch
     cp_ok = [l for l in (lab.dir / "store/robots/rover-01/checkpoints.jsonl").read_text().splitlines()]
-    assert len(cp_ok) == 1 and json.loads(json.loads(cp_ok[0])["payload"])["merkle_root"] == merkle_root(g.hashes)
+    assert len(cp_ok) == 1 and body_json(json.loads(cp_ok[0]))["merkle_root"] == merkle_root(g.hashes)
+
+
+def test_pae_matches_the_dsse_spec_example():
+    assert pae("application/example", b"hello world") == b"DSSEv1 19 application/example 11 hello world"
 
 
 def test_key_file_round_trip_and_tamper(tmp_path):
@@ -63,7 +67,7 @@ def test_key_file_round_trip_and_tamper(tmp_path):
 
 def test_host_origin_size_and_unknown_routes_are_refused(lab):
     assert " 421 " in raw(lab, f"GET /v1/status HTTP/1.1\r\nHost: evil.example:{lab.port}\r\n\r\n".encode())
-    body = b'{"payload":"x","key_id":"x","public_key":"x","signature":"x"}'
+    body = b'{"payload":"x","payloadType":"x","signatures":[]}'
     req = (f"POST /v1/observations HTTP/1.1\r\nHost: 127.0.0.1:{lab.port}\r\nOrigin: https://evil.example\r\n"
            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
     assert " 403 " in raw(lab, req)

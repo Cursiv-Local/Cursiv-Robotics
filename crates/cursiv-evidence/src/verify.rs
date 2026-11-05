@@ -13,7 +13,7 @@ use crate::merkle;
 use crate::model::{self, Checkpoint, Record, GENESIS};
 use crate::package::{safe_rel, MANIFEST_SCHEMA};
 use crate::store::Receipt;
-use crate::trust::{judge_robot, KeyVerdict, TrustStore};
+use crate::trust::{KeyVerdict, TrustStore};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -187,6 +187,45 @@ fn verdict_word(trust: Option<&TrustStore>, v: &KeyVerdict) -> &'static str {
     }
 }
 
+/// Signature checking for DSSE envelopes, which carry no public key. The key comes from the
+/// trust store when the signer is enrolled there; otherwise from the package's own key list,
+/// which can show the content is unchanged relative to that key but never who holds it.
+struct Signers<'a> {
+    trust: Option<&'a TrustStore>,
+    listed: HashMap<String, String>,
+}
+
+enum Owner<'a> {
+    Robot(&'a str),
+    Station(&'a str),
+}
+
+impl Signers<'_> {
+    /// (Some(signature verifies) | None = no key known for this keyid, trust verdict)
+    fn check(&self, env: &Envelope, owner: Owner, seq: Option<u64>) -> (Option<bool>, KeyVerdict) {
+        let kid = env.keyid();
+        let trusted = match (self.trust, &owner) {
+            (Some(t), Owner::Robot(r)) => t.robot(r, kid),
+            (Some(t), Owner::Station(s)) => t.station(s, kid),
+            _ => None,
+        };
+        let key = trusted.map(|k| k.public_key.clone()).or_else(|| self.listed.get(kid).cloned());
+        let ok = key.map(|k| env.verify_with_b64(&k));
+        let verdict = match (self.trust, trusted) {
+            (None, _) => KeyVerdict::NoTrustStore,
+            (Some(_), None) => KeyVerdict::Unknown,
+            (Some(_), Some(k)) => TrustStore::verdict(k, seq),
+        };
+        (ok, verdict)
+    }
+}
+
+fn listed_keys(dir: &Path) -> HashMap<String, String> {
+    read_json_file(&dir.join("keys/public-keys.json")).ok()
+        .and_then(|v| v["keys"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v["public_key"].as_str()?.to_string()))).collect()))
+        .unwrap_or_default()
+}
+
 pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
     let mut ctx = Ctx { findings: Vec::new() };
     let mut robots: BTreeMap<String, RobotSummary> = BTreeMap::new();
@@ -201,6 +240,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
         return finish(dir, trust, ctx, robots, all_records, receipts_out, false, false, false);
     }
     let files = inventory(dir, &mut ctx);
+    let signers = Signers { trust, listed: listed_keys(dir) };
 
     // 1. Manifest
     let manifest: Option<Envelope> = match read_json_file(&dir.join("manifest.json")).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())) {
@@ -213,21 +253,20 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
     let mut listed: BTreeMap<String, (String, u64)> = BTreeMap::new();
     let mut station_id = String::new();
     if let Some(m) = &manifest {
-        if !m.signature_valid() {
-            ctx.err("integrity", "manifest_signature", "manifest.json signature does not match its contents");
-        }
-        let body: serde_json::Value = serde_json::from_str(&m.payload).unwrap_or_default();
-        if body["schema"] != MANIFEST_SCHEMA {
+        let body: serde_json::Value = m.body_text().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        if body["schema"] != MANIFEST_SCHEMA || m.payload_type != crate::crypto::MANIFEST_TYPE {
             ctx.err("structure", "manifest_schema", "manifest is not a cursiv-package-1 manifest");
         }
         station_id = body["station_id"].as_str().unwrap_or("").to_string();
-        match trust.map(|t| t.station_key(&station_id, &m.key_id, &m.public_key)) {
-            Some(KeyVerdict::Trusted) => {}
-            Some(v) => {
-                authentic_ok = false;
-                ctx.err("authenticity", "untrusted_station", format!("manifest signed by station key {} ({})", m.key_id, verdict_word(trust, &v)));
-            }
-            None => {}
+        let (ok, v) = signers.check(m, Owner::Station(&station_id), None);
+        match ok {
+            Some(false) => ctx.err("integrity", "manifest_signature", "manifest.json signature does not match its contents"),
+            None => ctx.err("integrity", "signature_unverifiable", format!("no public key for manifest signer {}: the manifest cannot be checked", m.keyid())),
+            Some(true) => {}
+        }
+        if trust.is_some() && v != KeyVerdict::Trusted {
+            authentic_ok = false;
+            ctx.err("authenticity", "untrusted_station", format!("manifest signed by station key {} ({})", m.keyid(), verdict_word(trust, &v)));
         }
         if let Some(obj) = body["files"].as_object() {
             for (name, v) in obj {
@@ -302,10 +341,16 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
                 }
             };
             let hash = env.payload_hash();
-            if !env.signature_valid() {
-                ctx.add("integrity", "error", "record_signature", "record content does not match its signature (altered after signing)", Some(rid), Some(expect_seq));
+            let (sig_ok, v) = signers.check(&env, Owner::Robot(rid), Some(expect_seq));
+            match sig_ok {
+                Some(false) => ctx.add("integrity", "error", "record_signature", "record content does not match its signature (altered after signing)", Some(rid), Some(expect_seq)),
+                None => ctx.add("integrity", "error", "signature_unverifiable", format!("no public key for signer {}: neither the trust store nor the package names it", env.keyid()), Some(rid), Some(expect_seq)),
+                Some(true) => {}
             }
-            let rec: Record = match serde_json::from_str(&env.payload) {
+            if env.payload_type != crate::crypto::RECORD_TYPE {
+                ctx.add("structure", "error", "payload_type", format!("payloadType {:?} is not a record", env.payload_type), Some(rid), Some(expect_seq));
+            }
+            let rec: Record = match env.body_text().ok_or_else(|| "payload is not base64 UTF-8".to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
                 Ok(r) => r,
                 Err(e) => {
                     ctx.add("structure", "error", "bad_record", format!("payload is not a record: {e}"), Some(rid), Some(expect_seq));
@@ -323,10 +368,9 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
             if rec.prev != prev {
                 ctx.add("integrity", "error", "chain", "record does not follow the record before it", Some(rid), Some(rec.seq));
             }
-            let v = judge_robot(trust, rid, &env.key_id, &env.public_key, Some(rec.seq));
             if trust.is_some() && v != KeyVerdict::Trusted {
                 authentic_ok = false;
-                ctx.add("authenticity", "error", "untrusted_signer", format!("signed by key {} ({})", env.key_id, verdict_word(trust, &v)), Some(rid), Some(rec.seq));
+                ctx.add("authenticity", "error", "untrusted_signer", format!("signed by key {} ({})", env.keyid(), verdict_word(trust, &v)), Some(rid), Some(rec.seq));
             }
             for p in rec.observation.structural_problems() {
                 ctx.add("structure", "error", "invalid_observation", p, Some(rid), Some(rec.seq));
@@ -371,15 +415,15 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
                 ctx.add("integrity", "error", "unreadable_checkpoint", "checkpoint line is not a signed envelope", Some(rid), None);
                 continue;
             };
-            let Ok(cp) = serde_json::from_str::<Checkpoint>(&env.payload) else {
+            let Some(cp) = env.body_text().and_then(|t| serde_json::from_str::<Checkpoint>(&t).ok()) else {
                 ctx.add("structure", "error", "bad_checkpoint", "checkpoint payload is invalid", Some(rid), None);
                 continue;
             };
-            if !env.signature_valid() {
-                ctx.add("integrity", "error", "checkpoint_signature", "checkpoint altered after signing", Some(rid), None);
+            let (sig_ok, v) = signers.check(&env, Owner::Robot(rid), None);
+            if sig_ok != Some(true) || env.payload_type != crate::crypto::CHECKPOINT_TYPE {
+                ctx.add("integrity", "error", "checkpoint_signature", "checkpoint altered after signing, or its signer's key is unknown", Some(rid), None);
                 continue;
             }
-            let v = judge_robot(trust, rid, &env.key_id, &env.public_key, None);
             let trusted = v == KeyVerdict::Trusted;
             if cp.robot_id != *rid {
                 ctx.add("integrity", "error", "checkpoint_robot", "checkpoint names another robot", Some(rid), None);
@@ -402,7 +446,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
             if trusted {
                 summary.trusted_checkpoint_count = Some(summary.trusted_checkpoint_count.unwrap_or(0).max(cp.count));
             } else if trust.is_some() {
-                ctx.add("authenticity", "warning", "untrusted_checkpoint", format!("checkpoint signed by key {} ({}) is ignored for completeness", env.key_id, verdict_word(trust, &v)), Some(rid), None);
+                ctx.add("authenticity", "warning", "untrusted_checkpoint", format!("checkpoint signed by key {} ({}) is ignored for completeness", env.keyid(), verdict_word(trust, &v)), Some(rid), None);
             }
         }
         if summary.trusted_checkpoint_count.is_none_or(|c| c < summary.records) {
@@ -415,17 +459,17 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
     match read_json_file(&dir.join("station-checkpoint.json")).and_then(|v| serde_json::from_value::<Envelope>(v).map_err(|e| e.to_string())) {
         Err(_) => ctx.err("completeness", "no_station_checkpoint", "station-checkpoint.json is missing or unreadable"),
         Ok(env) => {
-            if !env.signature_valid() {
-                ctx.err("integrity", "station_checkpoint_signature", "station checkpoint altered after signing");
+            let body: serde_json::Value = env.body_text().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            let sid = body["station_id"].as_str().unwrap_or("").to_string();
+            let (sig_ok, sv) = signers.check(&env, Owner::Station(&sid), None);
+            if sig_ok != Some(true) || env.payload_type != crate::crypto::STATION_CHECKPOINT_TYPE {
+                ctx.err("integrity", "station_checkpoint_signature", "station checkpoint altered after signing, or its signer's key is unknown");
             }
-            let body: serde_json::Value = serde_json::from_str(&env.payload).unwrap_or_default();
-            let sid = body["station_id"].as_str().unwrap_or("");
-            let sv = trust.map(|t| t.station_key(sid, &env.key_id, &env.public_key));
-            if sv.as_ref().is_some_and(|v| *v != KeyVerdict::Trusted) {
+            if trust.is_some() && sv != KeyVerdict::Trusted {
                 authentic_ok = false;
-                ctx.err("authenticity", "untrusted_station", format!("station checkpoint signed by key {} ({})", env.key_id, verdict_word(trust, sv.as_ref().unwrap())));
+                ctx.err("authenticity", "untrusted_station", format!("station checkpoint signed by key {} ({})", env.keyid(), verdict_word(trust, &sv)));
             }
-            let station_trusted = sv == Some(KeyVerdict::Trusted);
+            let station_trusted = sv == KeyVerdict::Trusted && sig_ok == Some(true);
             if let Some(obj) = body["robots"].as_object() {
                 for (rid, v) in obj {
                     let count = v["count"].as_u64().unwrap_or(0);

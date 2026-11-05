@@ -54,10 +54,16 @@ impl TrustStore {
         Ok(t)
     }
 
-    fn judge(keys: Option<&Vec<TrustedKey>>, key_id: &str, public_key: &str, seq: Option<u64>) -> KeyVerdict {
-        let Some(k) = keys.and_then(|ks| ks.iter().find(|k| k.key_id == key_id && k.public_key == public_key)) else {
-            return KeyVerdict::Unknown;
-        };
+    pub fn robot(&self, robot_id: &str, keyid: &str) -> Option<&TrustedKey> {
+        self.robots.get(robot_id)?.iter().find(|k| k.key_id == keyid)
+    }
+
+    pub fn station(&self, station_id: &str, keyid: &str) -> Option<&TrustedKey> {
+        self.stations.get(station_id)?.iter().find(|k| k.key_id == keyid)
+    }
+
+    /// Whether a listed key may sign record `seq` (None: not seq-bound, e.g. checkpoints).
+    pub fn verdict(k: &TrustedKey, seq: Option<u64>) -> KeyVerdict {
         if k.status == "revoked" {
             return KeyVerdict::Revoked;
         }
@@ -66,25 +72,6 @@ impl TrustStore {
                 return KeyVerdict::OutOfWindow;
             }
         }
-        if k.status == "active" || k.status == "retired" {
-            KeyVerdict::Trusted
-        } else {
-            KeyVerdict::Unknown
-        }
-    }
-
-    pub fn robot_key(&self, robot_id: &str, key_id: &str, public_key: &str, seq: Option<u64>) -> KeyVerdict {
-        Self::judge(self.robots.get(robot_id), key_id, public_key, seq)
-    }
-
-    pub fn station_key(&self, station_id: &str, key_id: &str, public_key: &str) -> KeyVerdict {
-        Self::judge(self.stations.get(station_id), key_id, public_key, None)
-    }
-}
-
-pub fn judge_robot(trust: Option<&TrustStore>, robot_id: &str, key_id: &str, public_key: &str, seq: Option<u64>) -> KeyVerdict {
-    match trust {
-        Some(t) => t.robot_key(robot_id, key_id, public_key, seq),
-        None => KeyVerdict::NoTrustStore,
+        if k.status == "active" || k.status == "retired" { KeyVerdict::Trusted } else { KeyVerdict::Unknown }
     }
 }

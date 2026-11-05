@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .client import BridgeClient, LinkDown
-from .identity import Identity, merkle_root, payload_hash
+from .identity import CHECKPOINT_TYPE, RECORD_TYPE, Identity, merkle_root, payload_hash
 
 SOFTWARE = "cursiv-sim"
 VERSION = "0.1.0"
@@ -115,7 +115,7 @@ class RobotAgent:
         rec = {"schema": "cursiv-record-1", "robot_id": self.robot_id, "seq": len(self.envelopes) + 1,
                "prev": self.hashes[-1] if self.hashes else "genesis", "written_time": utc(datetime.now(timezone.utc)),
                "observation": observation}
-        env = self.identity.sign(rec)
+        env = self.identity.sign(rec, RECORD_TYPE)
         self._persist(env)
         self.envelopes.append(env)
         self.hashes.append(payload_hash(env))
@@ -124,7 +124,8 @@ class RobotAgent:
     def checkpoint(self) -> dict:
         return self.identity.sign({"schema": "cursiv-checkpoint-1", "robot_id": self.robot_id, "count": len(self.hashes),
                                    "head": self.hashes[-1] if self.hashes else "genesis",
-                                   "merkle_root": merkle_root(self.hashes), "signed_time": utc(datetime.now(timezone.utc))})
+                                   "merkle_root": merkle_root(self.hashes), "signed_time": utc(datetime.now(timezone.utc))},
+                                  CHECKPOINT_TYPE)
 
     def upload(self, data: bytes, sha: str) -> None:
         if not self.link_up:

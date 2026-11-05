@@ -3,7 +3,8 @@
 //! introduced deliberately and must be detected (or, for operational faults,
 //! recovered from).
 
-use cursiv_evidence::crypto::{public_b64, sha256_hex, Envelope, Identity};
+use cursiv_evidence::crypto::{public_b64, sha256_hex, Envelope, Identity, CHECKPOINT_TYPE, MANIFEST_TYPE, RECORD_TYPE};
+use base64::Engine;
 use cursiv_evidence::merkle;
 use cursiv_evidence::model::*;
 use cursiv_evidence::science::{self, Profile};
@@ -61,13 +62,13 @@ impl Robot {
     fn record(&mut self, o: Observation) -> Envelope {
         let rec = Record { schema: RECORD_SCHEMA.into(), robot_id: self.id.clone(), seq: self.hashes.len() as u64 + 1,
                            prev: self.hashes.last().cloned().unwrap_or_else(|| GENESIS.into()), written_time: None, observation: o };
-        let env = self.key.sign_json(&rec);
+        let env = self.key.sign_json(RECORD_TYPE, &rec);
         self.hashes.push(env.payload_hash());
         env
     }
 
     fn checkpoint(&self) -> Envelope {
-        self.key.sign_json(&Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: self.id.clone(), count: self.hashes.len() as u64,
+        self.key.sign_json(CHECKPOINT_TYPE, &Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: self.id.clone(), count: self.hashes.len() as u64,
             head: self.hashes.last().cloned().unwrap_or_else(|| GENESIS.into()), merkle_root: merkle::root(&self.hashes), signed_time: None })
     }
 }
@@ -130,19 +131,30 @@ fn codes(r: &verify::Report) -> Vec<String> {
 /// files and the manifest but does not hold the station key (uses their own key).
 fn reseal_with(pkg: &Path, attacker: &Identity) {
     let m: Envelope = serde_json::from_str(&fs::read_to_string(pkg.join("manifest.json")).unwrap()).unwrap();
-    let mut body: serde_json::Value = serde_json::from_str(&m.payload).unwrap();
+    let mut body: serde_json::Value = serde_json::from_str(&m.body_text().unwrap()).unwrap();
     for (name, v) in body["files"].as_object_mut().unwrap() {
         let b = fs::read(pkg.join(name)).unwrap();
         v["sha256"] = sha256_hex(&b).into();
         v["size"] = b.len().into();
     }
-    fs::write(pkg.join("manifest.json"), serde_json::to_string(&attacker.sign_json(&body)).unwrap()).unwrap();
+    fs::write(pkg.join("manifest.json"), serde_json::to_string(&attacker.sign_json(MANIFEST_TYPE, &body)).unwrap()).unwrap();
 }
 
+/// The attacker also lists their own key in the package, so the rebuilt package is internally consistent.
+fn list_key(pkg: &Path, who: &Identity) {
+    let f = pkg.join("keys/public-keys.json");
+    let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&f).unwrap()).unwrap();
+    v["keys"][who.key_id()] = serde_json::json!({"public_key": public_b64(&who.public()), "seen_for": "attacker"});
+    fs::write(&f, v.to_string()).unwrap();
+}
+
+/// Edit the decoded body of record line `n`, keeping its signature (an in-place forgery).
 fn rewrite_line(path: &Path, n: usize, f: impl Fn(&str) -> String) {
     let text = fs::read_to_string(path).unwrap();
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    lines[n] = f(&lines[n]);
+    let mut env: Envelope = serde_json::from_str(&lines[n]).unwrap();
+    env.payload = base64::engine::general_purpose::STANDARD.encode(f(&env.body_text().unwrap()));
+    lines[n] = serde_json::to_string(&env).unwrap();
     fs::write(path, lines.join("\n") + "\n").unwrap();
 }
 
@@ -253,20 +265,21 @@ fn faults_10_11_corrupted_export_and_rebuilt_chain() {
     let mut hashes = vec![];
     for line in fs::read_to_string(&f).unwrap().lines() {
         let env: Envelope = serde_json::from_str(line).unwrap();
-        let mut rec: Record = serde_json::from_str(&env.payload).unwrap();
+        let mut rec: Record = serde_json::from_str(&env.body_text().unwrap()).unwrap();
         rec.prev = prev.clone();
         if rec.seq == 4 {
             rec.observation.measurement.as_mut().unwrap().value = Some(99.0);
         }
-        let e = attacker.sign_json(&rec);
+        let e = attacker.sign_json(RECORD_TYPE, &rec);
         prev = e.payload_hash();
         hashes.push(prev.clone());
         out += &serde_json::to_string(&e).unwrap();
         out.push('\n');
     }
     fs::write(&f, out).unwrap();
-    let cp = attacker.sign_json(&Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: "rover-03".into(), count: 8, head: prev.clone(), merkle_root: merkle::root(&hashes), signed_time: None });
+    let cp = attacker.sign_json(CHECKPOINT_TYPE, &Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: "rover-03".into(), count: 8, head: prev.clone(), merkle_root: merkle::root(&hashes), signed_time: None });
     fs::write(p.join("robots/rover-03/checkpoints.jsonl"), serde_json::to_string(&cp).unwrap() + "\n").unwrap();
+    list_key(&p, &attacker);
     reseal_with(&p, &attacker);
     let r = l.verify(&p);
     assert_eq!(r.verdicts.authenticity, "fail", "{}", r.text());
@@ -425,9 +438,9 @@ fn hostile_package_paths_and_links_are_refused() {
     assert_eq!(r.verdicts.structure, "fail");
     // manifest naming ../ paths
     let m: Envelope = serde_json::from_str(&fs::read_to_string(p.join("manifest.json")).unwrap()).unwrap();
-    let mut body: serde_json::Value = serde_json::from_str(&m.payload).unwrap();
+    let mut body: serde_json::Value = serde_json::from_str(&m.body_text().unwrap()).unwrap();
     body["files"]["../../etc/passwd"] = serde_json::json!({"sha256": "0".repeat(64), "size": 1});
-    fs::write(p.join("manifest.json"), serde_json::to_string(&Identity::from_seed(l.station).sign_json(&body)).unwrap()).unwrap();
+    fs::write(p.join("manifest.json"), serde_json::to_string(&Identity::from_seed(l.station).sign_json(MANIFEST_TYPE, &body)).unwrap()).unwrap();
     let r = l.verify(&p);
     assert!(codes(&r).contains(&"unsafe_path".to_string()));
 }
@@ -446,9 +459,15 @@ fn malformed_and_oversized_inputs_are_rejected() {
     r.hashes.clear();
     let e = r.record(o);
     assert!(matches!(l.store.ingest_batch(&[e]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "invalid_observation"));
-    let garbage = Envelope { payload: "{\"schema\":\"cursiv-record-1\"".into(), key_id: "x".into(), public_key: "y".into(), signature: "z".into() };
-    assert!(matches!(l.store.ingest_batch(&[garbage]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "bad_signature"));
-    let unknown_field = l.robots[1].key.sign_payload("{\"schema\":\"cursiv-record-1\",\"robot_id\":\"rover-02\",\"seq\":1,\"prev\":\"genesis\",\"written_time\":null,\"observation\":{},\"extra\":1}".into());
+    let garbage = Envelope { payload: "{\"schema\":\"cursiv-record-1\"".into(), payload_type: RECORD_TYPE.into(), signatures: vec![] };
+    assert!(matches!(l.store.ingest_batch(&[garbage]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "malformed"));
+    let o1 = l.robots[1].obs(1, "air_temperature", 1.0, "2026-11-05T10:00:00Z");
+    let mut forged = l.robots[1].record(o1);
+    let o2 = l.robots[2].obs(1, "air_temperature", 1.0, "2026-11-05T10:00:00Z");
+    forged.signatures[0].sig = l.robots[2].record(o2).signatures[0].sig.clone();
+    assert!(matches!(l.store.ingest_batch(&[forged]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "bad_signature"));
+    l.robots[1].hashes.clear();
+    let unknown_field = l.robots[1].key.sign_payload(RECORD_TYPE, "{\"schema\":\"cursiv-record-1\",\"robot_id\":\"rover-02\",\"seq\":1,\"prev\":\"genesis\",\"written_time\":null,\"observation\":{},\"extra\":1}");
     assert!(matches!(l.store.ingest_batch(&[unknown_field]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "malformed"));
 }
 
@@ -481,7 +500,7 @@ fn dense_or_hostile_packages_cannot_explode_the_agreement_check() {
     for k in 0..2500u64 {
         for (r, v) in [(&mut a, 10.0), (&mut b, 20.0)] {
             let e = r.record(r.obs(k + 1, "air_temperature", v, "2026-11-05T10:00:00Z"));
-            records.push((serde_json::from_str::<Record>(&e.payload).unwrap(), e.payload_hash()));
+            records.push((serde_json::from_str::<Record>(&e.body_text().unwrap()).unwrap(), e.payload_hash()));
         }
     }
     let t = std::time::Instant::now();

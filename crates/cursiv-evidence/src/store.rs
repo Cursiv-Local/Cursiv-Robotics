@@ -179,7 +179,7 @@ impl Store {
             let envs: Vec<Envelope> = read_jsonl_recovering(&e.path().join("records.jsonl"), &mut notes)?;
             let mut st = RobotState::default();
             for (i, env) in envs.iter().enumerate() {
-                let rec: Record = serde_json::from_str(&env.payload).map_err(|_| format!("robots/{name} record {} unreadable", i + 1))?;
+                let rec: Record = env.body_text().and_then(|t| serde_json::from_str(&t).ok()).ok_or_else(|| format!("robots/{name} record {} unreadable", i + 1))?;
                 if rec.seq != i as u64 + 1 || rec.prev != st.head() || rec.robot_id != name {
                     return Err(format!("robots/{name}: chain broken at record {}; refusing to start", i + 1));
                 }
@@ -257,25 +257,37 @@ impl Store {
         let _ = append_lines(&self.root.join("incidents.jsonl"), &[line]);
     }
 
+    /// Look the signing key up in the trust store, verify the DSSE signature with it, then
+    /// check the key's status and validity window. A key the submitter names but the
+    /// operator did not enrol is untrusted, however valid its signature.
     fn check_key(&self, robot_id: &str, env: &Envelope, seq: Option<u64>) -> Result<(), Outcome> {
-        match self.trust.robot_key(robot_id, &env.key_id, &env.public_key, seq) {
+        let kid = env.keyid().to_string();
+        let Some(k) = self.trust.robot(robot_id, &kid) else {
+            return Err(Outcome::reject("untrusted_key", format!("key {kid} is not enrolled for {robot_id}")));
+        };
+        if !env.verify_with_b64(&k.public_key) {
+            return Err(Outcome::reject("bad_signature", format!("signature does not verify with {robot_id}'s enrolled key {kid}")));
+        }
+        match TrustStore::verdict(k, seq) {
             KeyVerdict::Trusted => Ok(()),
-            KeyVerdict::Revoked => Err(Outcome::reject("revoked_key", format!("key {} for {robot_id} is revoked", env.key_id))),
-            KeyVerdict::OutOfWindow => Err(Outcome::reject("key_out_of_window", format!("key {} is not valid for {robot_id} at this sequence number", env.key_id))),
-            _ => Err(Outcome::reject("untrusted_key", format!("key {} is not enrolled for {robot_id}", env.key_id))),
+            KeyVerdict::Revoked => Err(Outcome::reject("revoked_key", format!("key {kid} for {robot_id} is revoked"))),
+            KeyVerdict::OutOfWindow => Err(Outcome::reject("key_out_of_window", format!("key {kid} is not valid for {robot_id} at this sequence number"))),
+            _ => Err(Outcome::reject("untrusted_key", format!("key {kid} is not usable for {robot_id}"))),
         }
     }
 
     /// Validate one record against the current state (and the records already accepted
     /// earlier in the same batch, reflected in `self`). Does not write.
     fn admit(&mut self, env: &Envelope) -> Result<(Record, String), Outcome> {
-        if !env.signature_valid() {
-            return Err(Outcome::reject("bad_signature", "signature does not match the payload and the key it names"));
+        if env.payload_type != crate::crypto::RECORD_TYPE {
+            return Err(Outcome::reject("malformed", format!("payloadType must be {}", crate::crypto::RECORD_TYPE)));
         }
-        let rec: Record = serde_json::from_str(&env.payload).map_err(|e| Outcome::reject("malformed", format!("payload is not a valid record: {e}")))?;
+        let text = env.body_text().ok_or_else(|| Outcome::reject("malformed", "payload is not base64 UTF-8"))?;
+        let rec: Record = serde_json::from_str(&text).map_err(|e| Outcome::reject("malformed", format!("payload is not a valid record: {e}")))?;
         if rec.schema != RECORD_SCHEMA || !model::valid_id(&rec.robot_id) {
             return Err(Outcome::reject("malformed", "unsupported record schema or robot id"));
         }
+        self.check_key(&rec.robot_id, env, Some(rec.seq))?;
         if rec.observation.robot_id != rec.robot_id {
             return Err(Outcome::reject("invalid_observation", "observation.robot_id differs from the record's robot_id"));
         }
@@ -283,7 +295,6 @@ impl Store {
         if !problems.is_empty() {
             return Err(Outcome::reject("invalid_observation", problems.join("; ")));
         }
-        self.check_key(&rec.robot_id, env, Some(rec.seq))?;
         let hash = env.payload_hash();
         let st = self.robots.entry(rec.robot_id.clone()).or_default();
         let count = st.hashes.len() as u64;
@@ -336,7 +347,7 @@ impl Store {
                 Err(o) => {
                     if let Outcome::Rejected { code, detail, .. } = &o {
                         if matches!(code.as_str(), "equivocation" | "untrusted_key" | "revoked_key" | "key_out_of_window" | "bad_signature") {
-                            let rid = serde_json::from_str::<Record>(&env.payload).ok().map(|r| r.robot_id);
+                            let rid = env.body_text().and_then(|t| serde_json::from_str::<Record>(&t).ok()).map(|r| r.robot_id);
                             self.incident(code, rid.as_deref(), &format!("{detail} (payload sha256 {})", env.payload_hash()));
                         }
                     }
@@ -359,10 +370,10 @@ impl Store {
     /// A robot's signed checkpoint. Accepted when it agrees with what was received,
     /// or when it claims records not yet received (which proves they are missing).
     pub fn ingest_checkpoint(&mut self, env: &Envelope) -> Outcome {
-        if !env.signature_valid() {
-            return Outcome::reject("bad_signature", "signature does not match");
+        if env.payload_type != crate::crypto::CHECKPOINT_TYPE {
+            return Outcome::reject("malformed", format!("payloadType must be {}", crate::crypto::CHECKPOINT_TYPE));
         }
-        let cp: Checkpoint = match serde_json::from_str(&env.payload) {
+        let cp: Checkpoint = match env.body_text().ok_or("payload is not base64 UTF-8".to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
             Ok(c) => c,
             Err(e) => return Outcome::reject("malformed", format!("not a checkpoint: {e}")),
         };
@@ -424,7 +435,7 @@ impl Store {
         let robots: BTreeMap<_, _> = self.robots.iter().map(|(id, s)| {
             (id.clone(), serde_json::json!({"count": s.hashes.len(), "head": s.head(), "merkle_root": merkle::root(&s.hashes)}))
         }).collect();
-        self.station.sign_json(&serde_json::json!({
+        self.station.sign_json(crate::crypto::STATION_CHECKPOINT_TYPE, &serde_json::json!({
             "schema": "cursiv-station-checkpoint-1",
             "station_id": self.station_id,
             "signed_time": model::now_utc(),

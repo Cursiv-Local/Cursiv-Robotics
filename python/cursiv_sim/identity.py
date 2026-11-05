@@ -1,5 +1,6 @@
 """Robot identities: one Ed25519 key per robot, in the same key-file format the Rust
-service uses (``cursiv-robotics-key-1``), and envelopes over the exact payload bytes.
+service uses (``cursiv-robotics-key-1``), and DSSE envelopes (secure-systems-lab/dsse,
+Apache-2.0; the envelope in-toto and Sigstore use) over the exact payload bytes.
 
 Key ids follow Cursiv's ``core/devicekey.py``: first 16 hex chars of SHA-256(raw public key).
 """
@@ -67,20 +68,45 @@ class Identity:
             os.fsync(f.fileno())
         os.replace(tmp, path)
 
-    def sign_payload(self, payload: str) -> dict:
-        return {"payload": payload, "key_id": self.key_id, "public_key": self.public_key,
-                "signature": _b64(self._key.sign(payload.encode("utf-8")))}
+    def sign_payload(self, payload_type: str, body: str) -> dict:
+        raw = body.encode("utf-8")
+        return {"payload": _b64(raw), "payloadType": payload_type,
+                "signatures": [{"keyid": self.key_id, "sig": _b64(self._key.sign(pae(payload_type, raw)))}]}
 
-    def sign(self, obj) -> dict:
-        return self.sign_payload(canonical(obj))
+    def sign(self, obj, payload_type: str) -> dict:
+        return self.sign_payload(payload_type, canonical(obj))
 
     def trusted_entry(self, note: str = "") -> dict:
         return {"key_id": self.key_id, "public_key": self.public_key, "status": "active", "note": note or None,
                 "valid_from_seq": None, "valid_until_seq": None}
 
 
+RECORD_TYPE = "application/vnd.cursiv.record.v1+json"
+CHECKPOINT_TYPE = "application/vnd.cursiv.checkpoint.v1+json"
+MANIFEST_TYPE = "application/vnd.cursiv.package-manifest.v1+json"
+
+
+def pae(payload_type: str, body: bytes) -> bytes:
+    """DSSE pre-authentication encoding: "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body."""
+    t = payload_type.encode("utf-8")
+    return b"DSSEv1 %d %s %d %s" % (len(t), t, len(body), body)
+
+
+def body(envelope: dict) -> bytes:
+    return base64.b64decode(envelope["payload"])
+
+
+def body_json(envelope: dict):
+    return json.loads(body(envelope))
+
+
+def with_body(envelope: dict, obj) -> dict:
+    """The same envelope (same signatures) with a different body: a forgery, for fault tests."""
+    return dict(envelope, payload=_b64(canonical(obj).encode("utf-8")))
+
+
 def payload_hash(envelope: dict) -> str:
-    return sha256_hex(envelope["payload"].encode("utf-8"))
+    return sha256_hex(body(envelope))
 
 
 def merkle_root(hashes: list[str]) -> str:

@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-from .identity import Identity, sha256_hex
+from .identity import MANIFEST_TYPE, RECORD_TYPE, Identity, body_json, payload_hash, sha256_hex, with_body
 from .lab import Lab
 from .robot import RobotAgent
 from .rovers import ROVERS
@@ -58,9 +58,9 @@ def edit_record(pkg: Path, robot: str, index: int, mutate) -> None:
     f = pkg / f"robots/{robot}/records.jsonl"
     lines = f.read_text().splitlines()
     env = json.loads(lines[index])
-    rec = json.loads(env["payload"])
+    rec = body_json(env)
     mutate(rec)
-    env["payload"] = json.dumps(rec, separators=(",", ":"), sort_keys=True)
+    env = with_body(env, rec)
     lines[index] = json.dumps(env)
     f.write_text("\n".join(lines) + "\n")
 
@@ -131,7 +131,7 @@ def main(argv=None) -> int:
     def s4():
         g = fleet.rovers["rover-02"].agent
         st1, d1, _ = lab.client.submit([g.envelopes[3]]); d1 = first(d1)
-        obs = json.loads(g.envelopes[3]["payload"])["observation"]
+        obs = body_json(g.envelopes[3])["observation"]
         clone = dict(obs, sensor_time=g.sensor_now())
         st2, d2, _ = lab.client.submit([g.record(clone)])     # new record reusing an observation_id
         d2 = first(d2)
@@ -189,10 +189,10 @@ def main(argv=None) -> int:
     def s12():
         impostor = Identity.generate()
         g = f2.rovers["rover-02"].agent
-        rec = json.loads(g.envelopes[-1]["payload"])
+        rec = body_json(g.envelopes[-1])
         rec = dict(rec, seq=len(g.envelopes) + 1, prev=g.hashes[-1])
-        st, d, _ = lab2.client.submit([impostor.sign(rec)]); d = first(d)
-        bad = dict(g.envelopes[-1], signature=g.envelopes[-2]["signature"])
+        st, d, _ = lab2.client.submit([impostor.sign(rec, RECORD_TYPE)]); d = first(d)
+        bad = dict(g.envelopes[-1], signatures=[dict(g.envelopes[-1]["signatures"][0], sig=g.envelopes[-2]["signatures"][0]["sig"])])
         st2, d2, _ = lab2.client.submit([bad]); d2 = first(d2)
         incidents = (lab2.dir / "store/incidents.jsonl").read_text()
         return f"impostor key -> {st} {d.get('code')}; forged signature -> {st2} {d2.get('code')}; logged: {'untrusted_key' in incidents}", \
@@ -320,22 +320,26 @@ def main(argv=None) -> int:
         f = p / "robots/rover-01/records.jsonl"
         prev, out_lines = "genesis", []
         for line in f.read_text().splitlines():
-            rec = json.loads(json.loads(line)["payload"])
+            rec = body_json(json.loads(line))
             rec["prev"] = prev
             if rec["seq"] == 3:
                 rec["observation"]["measurement"]["value"] = 55.5
-            env = attacker.sign(rec)
-            prev = sha256_hex(env["payload"].encode())
+            env = attacker.sign(rec, RECORD_TYPE)
+            prev = payload_hash(env)
             out_lines.append(json.dumps(env))
         f.write_text("\n".join(out_lines) + "\n")
         (p / "robots/rover-01/checkpoints.jsonl").unlink()
         m = json.loads((p / "manifest.json").read_text())
-        body = json.loads(m["payload"])
+        keys_file = p / "keys/public-keys.json"           # the attacker lists their own key too
+        keys = json.loads(keys_file.read_text())
+        keys["keys"][attacker.key_id] = {"public_key": attacker.public_key, "seen_for": "attacker"}
+        keys_file.write_text(json.dumps(keys))
+        body = body_json(m)
         body["files"].pop("robots/rover-01/checkpoints.jsonl", None)
         for name in body["files"]:
             b = (p / name).read_bytes()
             body["files"][name] = {"sha256": sha256_hex(b), "size": len(b)}
-        (p / "manifest.json").write_text(json.dumps(attacker.sign(body)))
+        (p / "manifest.json").write_text(json.dumps(attacker.sign(body, MANIFEST_TYPE)))
         code, r = lab.verify(p)
         code_nt, r_nt = lab.verify(p, trust=False)
         return (f"with trust store: exit {code}, authenticity={v(r, 'authenticity')}; without: exit {code_nt}, "

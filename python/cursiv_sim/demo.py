@@ -18,6 +18,7 @@ import shutil
 import time
 from pathlib import Path
 
+from .identity import body_json, with_body
 from .lab import Lab
 from .robot import RobotAgent
 from .rovers import ROVERS
@@ -86,10 +87,10 @@ def main(argv=None) -> int:
     f = bad / "robots/rover-02/records.jsonl"
     lines = f.read_text().splitlines()
     env = json.loads(lines[3])
-    rec = json.loads(env["payload"])
+    rec = body_json(env)
     old = rec["observation"]["measurement"]["value"]
     rec["observation"]["measurement"]["value"] = round(old + 2.5, 3)
-    env["payload"] = json.dumps(rec, separators=(",", ":"), sort_keys=True)
+    env = with_body(env, rec)          # keep the robot's signature: an in-place forgery
     lines[3] = json.dumps(env)
     f.write_text("\n".join(lines) + "\n")
     print(f"      changed {old} -> {rec['observation']['measurement']['value']} degC")

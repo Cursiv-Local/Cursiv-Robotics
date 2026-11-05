@@ -53,7 +53,10 @@ pub(crate) fn export(store: &Store, dest: &Path, station: &Identity) -> Result<s
                 let f = fs::File::open(&src).map_err(|e| e.to_string())?;
                 for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
                     if let Ok(env) = serde_json::from_str::<Envelope>(&line) {
-                        keys.entry(env.key_id.clone()).or_insert(serde_json::json!({"public_key": env.public_key, "seen_for": id}));
+                        // DSSE envelopes carry no public key: list the enrolled key for each keyid seen.
+                        if let Some(k) = store.trust().robot(&id, env.keyid()) {
+                            keys.entry(k.key_id.clone()).or_insert(serde_json::json!({"public_key": k.public_key, "seen_for": id}));
+                        }
                     }
                 }
             }
@@ -82,7 +85,7 @@ Integrity (nothing changed), authenticity (who signed) and scientific accuracy a
 the verifier answers the first two. Observations marked synthetic are simulated, not real-world evidence.\n";
     fs::write(dest.join("README.txt"), readme).map_err(|e| e.to_string())?;
     files.insert("README.txt".into(), serde_json::json!({"sha256": crate::crypto::sha256_hex(readme.as_bytes()), "size": readme.len()}));
-    let manifest = station.sign_json(&serde_json::json!({
+    let manifest = station.sign_json(crate::crypto::MANIFEST_TYPE, &serde_json::json!({
         "schema": MANIFEST_SCHEMA,
         "station_id": store.station_id,
         "created_time": model::now_utc(),

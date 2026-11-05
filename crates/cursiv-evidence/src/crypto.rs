@@ -1,9 +1,9 @@
 //! Hashing, Ed25519 identities and signed envelopes.
 //!
-//! An envelope carries the *exact payload bytes* that were signed (as a JSON
-//! string), so a verifier never has to re-serialize JSON identically to the
-//! writer. Hashes and signatures are over those bytes. This avoids the
-//! cross-language canonical-JSON problem (number formatting, key order).
+//! Envelopes are DSSE (Dead Simple Signing Envelope, secure-systems-lab/dsse,
+//! Apache-2.0; used by in-toto and Sigstore). The payload is base64 of the exact
+//! body bytes, so a verifier never re-serializes JSON (no cross-language
+//! canonical-JSON problem). Record hashes are SHA-256 of those body bytes.
 //!
 //! The design follows Cursiv's `core/devicekey.py` (an Ed25519 key per
 //! installation, a short key id = first 16 hex chars of SHA-256(public key)),
@@ -43,32 +43,75 @@ pub fn parse_public_b64(s: &str) -> Result<VerifyingKey, String> {
     VerifyingKey::from_bytes(&arr).map_err(|_| "public key is not a valid Ed25519 point".to_string())
 }
 
-/// A signed payload. `payload` is the exact UTF-8 JSON text that was signed.
+pub const RECORD_TYPE: &str = "application/vnd.cursiv.record.v1+json";
+pub const CHECKPOINT_TYPE: &str = "application/vnd.cursiv.checkpoint.v1+json";
+pub const STATION_CHECKPOINT_TYPE: &str = "application/vnd.cursiv.station-checkpoint.v1+json";
+pub const MANIFEST_TYPE: &str = "application/vnd.cursiv.package-manifest.v1+json";
+
+/// DSSE pre-authentication encoding (secure-systems-lab/dsse protocol.md, Apache-2.0):
+/// "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body, LEN = ASCII decimal byte length.
+pub fn pae(payload_type: &str, body: &[u8]) -> Vec<u8> {
+    let mut out = format!("DSSEv1 {} {} {} ", payload_type.len(), payload_type, body.len()).into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+pub struct DsseSignature {
+    pub keyid: String,
+    pub sig: String,
+}
+
+/// A DSSE envelope (the format in-toto and Sigstore use). `payload` is base64 of the exact
+/// body bytes; signatures cover PAE(payloadType, body). DSSE carries no public key: who
+/// signed is decided by looking `keyid` up in a trust store (keyid itself is unauthenticated).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Envelope {
     pub payload: String,
-    pub key_id: String,
-    pub public_key: String,
-    pub signature: String,
+    #[serde(rename = "payloadType")]
+    pub payload_type: String,
+    pub signatures: Vec<DsseSignature>,
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::engine::general_purpose::URL_SAFE;
+    B64.decode(s).ok().or_else(|| URL_SAFE.decode(s).ok())
 }
 
 impl Envelope {
-    /// SHA-256 of the exact payload bytes: the record's identity in chains and Merkle trees.
-    pub fn payload_hash(&self) -> String {
-        sha256_hex(self.payload.as_bytes())
+    pub fn body(&self) -> Option<Vec<u8>> {
+        b64_decode(&self.payload)
     }
 
-    /// True when the signature matches the payload and the public key it names, and
-    /// key_id is that key's id. Integrity only: says nothing about who holds the key.
-    pub fn signature_valid(&self) -> bool {
-        let Ok(pk) = parse_public_b64(&self.public_key) else { return false };
-        if key_id(&pk) != self.key_id {
-            return false;
-        }
-        let Ok(raw) = B64.decode(&self.signature) else { return false };
-        let Ok(sig) = Signature::from_slice(&raw) else { return false };
-        pk.verify_strict(self.payload.as_bytes(), &sig).is_ok()
+    /// The body as UTF-8 text (all Cursiv payloads are JSON).
+    pub fn body_text(&self) -> Option<String> {
+        String::from_utf8(self.body()?).ok()
+    }
+
+    /// SHA-256 of the exact body bytes: the record's identity in chains and Merkle trees.
+    /// An undecodable payload hashes its base64 text, so it can still be named in reports.
+    pub fn payload_hash(&self) -> String {
+        sha256_hex(&self.body().unwrap_or_else(|| self.payload.clone().into_bytes()))
+    }
+
+    pub fn keyid(&self) -> &str {
+        self.signatures.first().map(|s| s.keyid.as_str()).unwrap_or("")
+    }
+
+    /// True when some signature with this key's id verifies over PAE(type, body).
+    /// Integrity relative to that key only; whether the key is trusted is a separate question.
+    pub fn verify_with(&self, public: &VerifyingKey) -> bool {
+        let Some(body) = self.body() else { return false };
+        let msg = pae(&self.payload_type, &body);
+        let kid = key_id(public);
+        self.signatures.iter().filter(|s| s.keyid == kid).any(|s| {
+            b64_decode(&s.sig).and_then(|raw| Signature::from_slice(&raw).ok())
+                .is_some_and(|sig| public.verify_strict(&msg, &sig).is_ok())
+        })
+    }
+
+    pub fn verify_with_b64(&self, public_b64: &str) -> bool {
+        parse_public_b64(public_b64).is_ok_and(|pk| self.verify_with(&pk))
     }
 }
 
@@ -95,18 +138,17 @@ impl Identity {
         key_id(&self.public())
     }
 
-    pub fn sign_payload(&self, payload: String) -> Envelope {
-        let sig = self.key.sign(payload.as_bytes());
+    pub fn sign_payload(&self, payload_type: &str, body: &str) -> Envelope {
+        let sig = self.key.sign(&pae(payload_type, body.as_bytes()));
         Envelope {
-            payload,
-            key_id: self.key_id(),
-            public_key: public_b64(&self.public()),
-            signature: B64.encode(sig.to_bytes()),
+            payload: B64.encode(body.as_bytes()),
+            payload_type: payload_type.into(),
+            signatures: vec![DsseSignature { keyid: self.key_id(), sig: B64.encode(sig.to_bytes()) }],
         }
     }
 
-    pub fn sign_json<T: Serialize>(&self, value: &T) -> Envelope {
-        self.sign_payload(serde_json::to_string(value).expect("serializable payload"))
+    pub fn sign_json<T: Serialize>(&self, payload_type: &str, value: &T) -> Envelope {
+        self.sign_payload(payload_type, &serde_json::to_string(value).expect("serializable payload"))
     }
 
     /// Key file: {"format":"cursiv-robotics-key-1","key_id","public_key","seed_b64"}.
@@ -160,20 +202,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pae_matches_the_dsse_spec_example() {
+        assert_eq!(pae("application/example", b"hello world"), b"DSSEv1 19 application/example 11 hello world".to_vec());
+    }
+
+    #[test]
     fn sign_verify_and_tamper() {
         let id = Identity::from_seed([7u8; 32]);
-        let env = id.sign_payload("{\"a\":1}".into());
-        assert!(env.signature_valid());
+        let env = id.sign_payload(RECORD_TYPE, "{\"a\":1}");
+        assert!(env.verify_with(&id.public()));
         let mut bad = env.clone();
-        bad.payload = "{\"a\":2}".into();
-        assert!(!bad.signature_valid());
-        let mut wrong_id = env.clone();
-        wrong_id.key_id = "0000000000000000".into();
-        assert!(!wrong_id.signature_valid());
+        bad.payload = B64.encode(b"{\"a\":2}");
+        assert!(!bad.verify_with(&id.public()));
+        let mut retyped = env.clone();
+        retyped.payload_type = CHECKPOINT_TYPE.into();
+        assert!(!retyped.verify_with(&id.public()), "payloadType is signed: no cross-type replay");
         let other = Identity::from_seed([8u8; 32]);
-        let mut swapped = env;
-        swapped.public_key = public_b64(&other.public());
-        swapped.key_id = other.key_id();
-        assert!(!swapped.signature_valid());
+        assert!(!env.verify_with(&other.public()));
+        let mut relabelled = env;
+        relabelled.signatures[0].keyid = other.key_id();
+        assert!(!relabelled.verify_with(&other.public()), "keyid is unauthenticated and cannot transfer a signature");
     }
 }
