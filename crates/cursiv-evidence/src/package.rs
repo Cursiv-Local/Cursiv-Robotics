@@ -1,14 +1,16 @@
-//! Evidence packages: a directory a third party can verify with `cursiv-verify`
-//! alone, given the operator's trust store.
+//! Evidence packages are BagIt bags (RFC 8493), so any BagIt tool (e.g. bagit-python,
+//! public domain) can check fixity, and `cursiv-verify` checks everything else, given the
+//! operator's trust store.
 //!
-//!   manifest.json                station-signed list of every other file (sha256, size)
-//!   station-checkpoint.json      station-signed heads/Merkle roots of every robot log and the receipts
-//!   robots/<id>/records.jsonl    robot-signed records, exactly as received
-//!   robots/<id>/checkpoints.jsonl
-//!   receipts.jsonl               when the station received each record
-//!   blobs/sha256/<hex>           attachments
-//!   keys/public-keys.json        keys seen in this package: informational, NEVER trusted from here
-//!   README.txt
+//!   bagit.txt, bag-info.txt, manifest-sha256.txt, tagmanifest-sha256.txt   BagIt tag files
+//!   manifest.json                     station-signed DSSE list of every data/ file (sha256, size)
+//!   data/station-checkpoint.json      station-signed heads/Merkle roots of every robot log and the receipts
+//!   data/robots/<id>/records.jsonl    robot-signed records, exactly as received
+//!   data/robots/<id>/checkpoints.jsonl
+//!   data/receipts.jsonl               when the station received each record
+//!   data/blobs/sha256/<hex>           attachments
+//!   data/keys/public-keys.json        keys seen in this package: informational, NEVER trusted from here
+//!   data/README.txt
 
 use crate::crypto::{public_b64, Envelope, Identity};
 use crate::model;
@@ -33,6 +35,9 @@ pub(crate) fn export(store: &Store, dest: &Path, station: &Identity) -> Result<s
     if dest.exists() {
         return Err(format!("{} already exists; choose a new folder", dest.display()));
     }
+    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let bag = dest;
+    let dest = &bag.join("data");
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let root = store.root();
     let mut files: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -91,6 +96,25 @@ the verifier answers the first two. Observations marked synthetic are simulated,
         "created_time": model::now_utc(),
         "files": files,
     }));
-    fs::write(dest.join("manifest.json"), serde_json::to_string_pretty(&manifest).unwrap()).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"path": dest.display().to_string(), "files": files.len()}))
+    let w = |name: &str, text: &str| fs::write(bag.join(name), text).map_err(|e| e.to_string());
+    w("manifest.json", &serde_json::to_string_pretty(&manifest).unwrap())?;
+    // BagIt (RFC 8493) tag files.
+    let mut bag_manifest = String::new();
+    let mut octets = 0u64;
+    for (rel, v) in &files {
+        bag_manifest += &format!("{}  data/{rel}\n", v["sha256"].as_str().unwrap());
+        octets += v["size"].as_u64().unwrap_or(0);
+    }
+    w("bagit.txt", "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n")?;
+    w("bag-info.txt", &format!(
+        "Bagging-Date: {}\nPayload-Oxum: {octets}.{}\nBag-Software-Agent: cursiv-evidence {}\nExternal-Identifier: {}\n\
+External-Description: Cursiv Robotics evidence package; verify with cursiv-verify (manifest.json is a DSSE envelope)\n",
+        &model::now_utc()[..10], files.len(), env!("CARGO_PKG_VERSION"), store.station_id))?;
+    w("manifest-sha256.txt", &bag_manifest)?;
+    let mut tags = String::new();
+    for name in ["bagit.txt", "bag-info.txt", "manifest-sha256.txt", "manifest.json"] {
+        tags += &format!("{}  {name}\n", crate::crypto::sha256_hex(&fs::read(bag.join(name)).map_err(|e| e.to_string())?));
+    }
+    w("tagmanifest-sha256.txt", &tags)?;
+    Ok(serde_json::json!({"path": bag.display().to_string(), "files": files.len(), "format": "BagIt 1.0"}))
 }

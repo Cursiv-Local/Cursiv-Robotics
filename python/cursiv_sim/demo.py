@@ -84,7 +84,7 @@ def main(argv=None) -> int:
 
     say(7, "Introducing a controlled integrity failure: rover-02's air temperature at record 4 is edited in a copy")
     bad = lab.copy_package(pkg1, "survey-part-1-altered")
-    f = bad / "robots/rover-02/records.jsonl"
+    f = bad / "data/robots/rover-02/records.jsonl"
     lines = f.read_text().splitlines()
     env = json.loads(lines[3])
     rec = body_json(env)

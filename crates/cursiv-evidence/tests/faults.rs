@@ -133,7 +133,7 @@ fn reseal_with(pkg: &Path, attacker: &Identity) {
     let m: Envelope = serde_json::from_str(&fs::read_to_string(pkg.join("manifest.json")).unwrap()).unwrap();
     let mut body: serde_json::Value = serde_json::from_str(&m.body_text().unwrap()).unwrap();
     for (name, v) in body["files"].as_object_mut().unwrap() {
-        let b = fs::read(pkg.join(name)).unwrap();
+        let b = fs::read(pkg.join("data").join(name)).unwrap();
         v["sha256"] = sha256_hex(&b).into();
         v["size"] = b.len().into();
     }
@@ -142,7 +142,7 @@ fn reseal_with(pkg: &Path, attacker: &Identity) {
 
 /// The attacker also lists their own key in the package, so the rebuilt package is internally consistent.
 fn list_key(pkg: &Path, who: &Identity) {
-    let f = pkg.join("keys/public-keys.json");
+    let f = pkg.join("data/keys/public-keys.json");
     let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&f).unwrap()).unwrap();
     v["keys"][who.key_id()] = serde_json::json!({"public_key": public_b64(&who.public()), "seen_for": "attacker"});
     fs::write(&f, v.to_string()).unwrap();
@@ -174,7 +174,7 @@ fn fault_1_altered_measurement_is_detected() {
     let mut l = lab("altered");
     l.survey(5);
     let p = l.export("pkg");
-    rewrite_line(&p.join("robots/rover-02/records.jsonl"), 2, |line| line.replace("14.2", "19.2"));
+    rewrite_line(&p.join("data/robots/rover-02/records.jsonl"), 2, |line| line.replace("14.2", "19.2"));
     let r = l.verify(&p);
     assert_eq!(r.verdicts.integrity, "fail");
     let c = codes(&r);
@@ -195,7 +195,7 @@ fn fault_2_modified_attachment_is_detected() {
     l.store.ingest_batch(&[env]).unwrap();
     let p = l.export("pkg");
     assert!(l.verify(&p).all_pass() || l.verify(&p).verdicts.completeness != "pass");
-    fs::write(p.join("blobs/sha256").join(&sha), b"synthetic image bytez").unwrap();
+    fs::write(p.join("data/blobs/sha256").join(&sha), b"synthetic image bytez").unwrap();
     let r = l.verify(&p);
     assert_eq!(r.verdicts.attachments, "fail");
     assert!(codes(&r).contains(&"attachment_changed".to_string()));
@@ -206,7 +206,7 @@ fn fault_3_missing_observation_is_detected_by_chain_and_checkpoint() {
     let mut l = lab("missing");
     l.survey(6);
     let p = l.export("pkg");
-    let f = p.join("robots/rover-01/records.jsonl");
+    let f = p.join("data/robots/rover-01/records.jsonl");
     let text = fs::read_to_string(&f).unwrap();
     let kept: Vec<&str> = text.lines().enumerate().filter(|(i, _)| *i != 3).map(|(_, l)| l).collect();
     fs::write(&f, kept.join("\n") + "\n").unwrap();
@@ -218,7 +218,7 @@ fn fault_3_missing_observation_is_detected_by_chain_and_checkpoint() {
     let mut l2 = lab("missing-tail");
     l2.survey(6);
     let p2 = l2.export("pkg");
-    let f2 = p2.join("robots/rover-01/records.jsonl");
+    let f2 = p2.join("data/robots/rover-01/records.jsonl");
     let t2 = fs::read_to_string(&f2).unwrap();
     fs::write(&f2, t2.lines().take(5).collect::<Vec<_>>().join("\n") + "\n").unwrap();
     let r2 = l2.verify(&p2);
@@ -248,7 +248,7 @@ fn faults_10_11_corrupted_export_and_rebuilt_chain() {
     l.survey(8);
     // 10: truncated export file
     let p = l.export("pkg-trunc");
-    let f = p.join("receipts.jsonl");
+    let f = p.join("data/receipts.jsonl");
     let b = fs::read(&f).unwrap();
     fs::write(&f, &b[..b.len() - 40]).unwrap();
     let r = l.verify(&p);
@@ -259,7 +259,7 @@ fn faults_10_11_corrupted_export_and_rebuilt_chain() {
     // manifest with their own keys. Internally consistent; must not pass authenticity.
     let p = l.export("pkg-rebuilt");
     let attacker = Identity::from_seed([66u8; 32]);
-    let f = p.join("robots/rover-03/records.jsonl");
+    let f = p.join("data/robots/rover-03/records.jsonl");
     let mut prev = GENESIS.to_string();
     let mut out = String::new();
     let mut hashes = vec![];
@@ -278,7 +278,7 @@ fn faults_10_11_corrupted_export_and_rebuilt_chain() {
     }
     fs::write(&f, out).unwrap();
     let cp = attacker.sign_json(CHECKPOINT_TYPE, &Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: "rover-03".into(), count: 8, head: prev.clone(), merkle_root: merkle::root(&hashes), signed_time: None });
-    fs::write(p.join("robots/rover-03/checkpoints.jsonl"), serde_json::to_string(&cp).unwrap() + "\n").unwrap();
+    fs::write(p.join("data/robots/rover-03/checkpoints.jsonl"), serde_json::to_string(&cp).unwrap() + "\n").unwrap();
     list_key(&p, &attacker);
     reseal_with(&p, &attacker);
     let r = l.verify(&p);
@@ -431,9 +431,9 @@ fn hostile_package_paths_and_links_are_refused() {
     let mut l = lab("hostile");
     l.survey(2);
     let p = l.export("pkg");
-    fs::create_dir_all(p.join("blobs/sha256")).unwrap();
+    fs::create_dir_all(p.join("data/blobs/sha256")).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink("/etc/passwd", p.join("blobs/sha256/link")).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", p.join("data/blobs/sha256/link")).unwrap();
     let r = l.verify(&p);
     assert_eq!(r.verdicts.structure, "fail");
     // manifest naming ../ paths

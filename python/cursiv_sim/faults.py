@@ -55,7 +55,7 @@ def v(rep: dict, key: str) -> str:
 
 
 def edit_record(pkg: Path, robot: str, index: int, mutate) -> None:
-    f = pkg / f"robots/{robot}/records.jsonl"
+    f = pkg / f"data/robots/{robot}/records.jsonl"
     lines = f.read_text().splitlines()
     env = json.loads(lines[index])
     rec = body_json(env)
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     @scenario(2, "Modified evidence attachment", "integrity")
     def s2():
         p = lab.copy_package(base, "s2")
-        blob = sorted((p / "blobs/sha256").iterdir())[0]
+        blob = sorted((p / "data/blobs/sha256").iterdir())[0]
         data = bytearray(blob.read_bytes())
         data[-20] ^= 0xFF
         blob.write_bytes(bytes(data))
@@ -120,7 +120,7 @@ def main(argv=None) -> int:
     @scenario(3, "Missing observation", "integrity")
     def s3():
         p = lab.copy_package(base, "s3")
-        f = p / "robots/rover-02/records.jsonl"
+        f = p / "data/robots/rover-02/records.jsonl"
         lines = f.read_text().splitlines()
         f.write_text("\n".join(lines[:-1]) + "\n")          # drop the LAST record: chain still links
         code, rep = lab.verify(p)
@@ -307,7 +307,7 @@ def main(argv=None) -> int:
     @scenario(10, "Corrupted export", "integrity")
     def s10():
         p = lab.copy_package(base, "s10")
-        f = p / "receipts.jsonl"
+        f = p / "data/receipts.jsonl"
         f.write_bytes(f.read_bytes()[:-57])
         code, r = lab.verify(p)
         return f"exit {code}; integrity={v(r, 'integrity')}; {sorted(errors(r) & {'truncated_file', 'file_changed', 'receipts_mismatch'})}", \
@@ -317,7 +317,7 @@ def main(argv=None) -> int:
     def s11():
         p = lab.copy_package(base, "s11")
         attacker = Identity.generate()
-        f = p / "robots/rover-01/records.jsonl"
+        f = p / "data/robots/rover-01/records.jsonl"
         prev, out_lines = "genesis", []
         for line in f.read_text().splitlines():
             rec = body_json(json.loads(line))
@@ -328,16 +328,16 @@ def main(argv=None) -> int:
             prev = payload_hash(env)
             out_lines.append(json.dumps(env))
         f.write_text("\n".join(out_lines) + "\n")
-        (p / "robots/rover-01/checkpoints.jsonl").unlink()
+        (p / "data/robots/rover-01/checkpoints.jsonl").unlink()
         m = json.loads((p / "manifest.json").read_text())
-        keys_file = p / "keys/public-keys.json"           # the attacker lists their own key too
+        keys_file = p / "data/keys/public-keys.json"           # the attacker lists their own key too
         keys = json.loads(keys_file.read_text())
         keys["keys"][attacker.key_id] = {"public_key": attacker.public_key, "seen_for": "attacker"}
         keys_file.write_text(json.dumps(keys))
         body = body_json(m)
         body["files"].pop("robots/rover-01/checkpoints.jsonl", None)
         for name in body["files"]:
-            b = (p / name).read_bytes()
+            b = (p / "data" / name).read_bytes()
             body["files"][name] = {"sha256": sha256_hex(b), "size": len(b)}
         (p / "manifest.json").write_text(json.dumps(attacker.sign(body, MANIFEST_TYPE)))
         code, r = lab.verify(p)

@@ -220,6 +220,46 @@ impl Signers<'_> {
     }
 }
 
+const TAG_FILES: [&str; 5] = ["bagit.txt", "bag-info.txt", "manifest-sha256.txt", "tagmanifest-sha256.txt", "manifest.json"];
+
+/// RFC 8493 fixity: manifest-sha256.txt must list every data/ file with its hash, and
+/// tagmanifest-sha256.txt the tag files. (Any BagIt tool checks the same.)
+fn check_bag(dir: &Path, data: &BTreeMap<String, u64>, ctx: &mut Ctx) {
+    let Ok(bagit) = fs::read_to_string(dir.join("bagit.txt")) else { return };
+    if !bagit.lines().any(|l| l.trim() == "BagIt-Version: 1.0") {
+        ctx.err("structure", "bagit_version", "bagit.txt does not declare BagIt-Version 1.0");
+    }
+    let parse = |name: &str, ctx: &mut Ctx| -> BTreeMap<String, String> {
+        let text = fs::read_to_string(dir.join(name)).unwrap_or_default();
+        if text.is_empty() {
+            ctx.err("integrity", "bag_manifest", format!("{name} is missing or empty"));
+        }
+        text.lines().filter_map(|l| {
+            let (h, p) = l.split_once(char::is_whitespace)?;
+            Some((p.trim_start().to_string(), h.to_ascii_lowercase()))
+        }).collect()
+    };
+    let payload = parse("manifest-sha256.txt", ctx);
+    for (path, hash) in &payload {
+        let rel = path.strip_prefix("data/").unwrap_or("");
+        if !safe_rel(path) || rel.is_empty() || !data.contains_key(rel) {
+            ctx.err("integrity", "bag_manifest", format!("manifest-sha256.txt lists {path:?}, which is not a data file"));
+        } else if file_sha256(&dir.join(path)).as_deref() != Some(hash.as_str()) {
+            ctx.err("integrity", "bag_fixity", format!("{path} does not match manifest-sha256.txt"));
+        }
+    }
+    for rel in data.keys() {
+        if !payload.contains_key(&format!("data/{rel}")) {
+            ctx.err("integrity", "bag_manifest", format!("data/{rel} is not in manifest-sha256.txt"));
+        }
+    }
+    for (path, hash) in parse("tagmanifest-sha256.txt", ctx) {
+        if !TAG_FILES.contains(&path.as_str()) || file_sha256(&dir.join(&path)).as_deref() != Some(hash.as_str()) {
+            ctx.err("integrity", "bag_fixity", format!("tag file {path} does not match tagmanifest-sha256.txt"));
+        }
+    }
+}
+
 fn listed_keys(dir: &Path) -> HashMap<String, String> {
     read_json_file(&dir.join("keys/public-keys.json")).ok()
         .and_then(|v| v["keys"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v["public_key"].as_str()?.to_string()))).collect()))
@@ -239,8 +279,24 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
         ctx.err("structure", "not_a_package", format!("{} is not a directory (or is a link)", dir.display()));
         return finish(dir, trust, ctx, robots, all_records, receipts_out, false, false, false);
     }
-    let files = inventory(dir, &mut ctx);
-    let signers = Signers { trust, listed: listed_keys(dir) };
+    // BagIt layout (RFC 8493): tag files at the root, evidence under data/.
+    let all = inventory(dir, &mut ctx);
+    let root = &dir.join("data");
+    if !dir.join("bagit.txt").is_file() || !root.is_dir() {
+        ctx.err("structure", "not_a_bag", "not a BagIt bag (bagit.txt and data/ are required)");
+    }
+    let mut files: BTreeMap<String, u64> = BTreeMap::new();
+    for (name, size) in &all {
+        match name.strip_prefix("data/") {
+            Some(rel) => {
+                files.insert(rel.to_string(), *size);
+            }
+            None if TAG_FILES.contains(&name.as_str()) => {}
+            None => ctx.err("integrity", "file_unlisted", format!("{name} is not part of the bag (added after it was made)")),
+        }
+    }
+    check_bag(dir, &files, &mut ctx);
+    let signers = Signers { trust, listed: listed_keys(root) };
 
     // 1. Manifest
     let manifest: Option<Envelope> = match read_json_file(&dir.join("manifest.json")).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())) {
@@ -282,14 +338,14 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
                 None => ctx.err("integrity", "file_missing", format!("{name} is listed in the manifest but missing")),
                 Some(actual) if actual != size => ctx.err("integrity", "file_changed", format!("{name} size changed ({actual} bytes, manifest says {size})")),
                 Some(_) => {
-                    if file_sha256(&dir.join(name)).as_deref() != Some(sha.as_str()) {
+                    if file_sha256(&root.join(name)).as_deref() != Some(sha.as_str()) {
                         ctx.err("integrity", "file_changed", format!("{name} was changed after the package was signed"));
                     }
                 }
             }
         }
         for name in files.keys() {
-            if name != "manifest.json" && !listed.contains_key(name) {
+            if !listed.contains_key(name) {
                 ctx.err("integrity", "file_unlisted", format!("{name} is not in the manifest (added after signing)"));
             }
         }
@@ -299,7 +355,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
     let mut blobs_ok: HashMap<String, bool> = HashMap::new();
     for name in files.keys().filter(|n| n.starts_with("blobs/sha256/")) {
         let sha = &name["blobs/sha256/".len()..];
-        let good = crate::crypto::is_sha256_hex(sha) && file_sha256(&dir.join(name)).as_deref() == Some(sha);
+        let good = crate::crypto::is_sha256_hex(sha) && file_sha256(&root.join(name)).as_deref() == Some(sha);
         if !good {
             ctx.err("attachments", "attachment_changed", format!("{name}: contents do not match the SHA-256 in its name"));
         }
@@ -326,7 +382,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
     let mut all_obs_ids: HashSet<(String, String)> = HashSet::new();
     for rid in &robot_ids {
         let rel = format!("robots/{rid}/records.jsonl");
-        let lines = read_lines(&dir.join(&rel), &mut ctx, &rel);
+        let lines = read_lines(&root.join(&rel), &mut ctx, &rel);
         let mut prev = GENESIS.to_string();
         let mut hashes = Vec::new();
         let mut seen_ids: HashMap<String, u64> = HashMap::new();
@@ -410,7 +466,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
 
         // Robot checkpoints
         let crel = format!("robots/{rid}/checkpoints.jsonl");
-        for line in read_lines(&dir.join(&crel), &mut ctx, &crel) {
+        for line in read_lines(&root.join(&crel), &mut ctx, &crel) {
             let Ok(env) = serde_json::from_str::<Envelope>(&line) else {
                 ctx.add("integrity", "error", "unreadable_checkpoint", "checkpoint line is not a signed envelope", Some(rid), None);
                 continue;
@@ -456,7 +512,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
     }
 
     // 4. Station checkpoint
-    match read_json_file(&dir.join("station-checkpoint.json")).and_then(|v| serde_json::from_value::<Envelope>(v).map_err(|e| e.to_string())) {
+    match read_json_file(&root.join("station-checkpoint.json")).and_then(|v| serde_json::from_value::<Envelope>(v).map_err(|e| e.to_string())) {
         Err(_) => ctx.err("completeness", "no_station_checkpoint", "station-checkpoint.json is missing or unreadable"),
         Ok(env) => {
             let body: serde_json::Value = env.body_text().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
@@ -498,7 +554,7 @@ pub fn verify_package(dir: &Path, trust: Option<&TrustStore>) -> Report {
                 completeness_established = robots.values().all(|r| r.trusted_checkpoint_count.is_some_and(|c| c >= r.records));
             }
             // receipts
-            let lines = read_lines(&dir.join("receipts.jsonl"), &mut ctx, "receipts.jsonl");
+            let lines = read_lines(&root.join("receipts.jsonl"), &mut ctx, "receipts.jsonl");
             let mut prev = GENESIS.to_string();
             let mut rh = Vec::new();
             for (i, l) in lines.iter().enumerate() {
