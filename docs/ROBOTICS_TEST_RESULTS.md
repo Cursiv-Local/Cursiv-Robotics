@@ -11,17 +11,18 @@ Windows and macOS were **not** tested in this iteration.
 | Memory | 15.7 GiB |
 | OS | Linux 6.18 x86_64, glibc 2.39 (Ubuntu 24.04) |
 | Rust | rustc 1.97.0, `cargo --release` |
-| Python | 3.13.18, cryptography (system) |
+| Python | 3.13.18, cryptography; optional: bagit 1.9.0, securesystemslib 1.6.0, mcap 1.6.0, mcap-ros2-support 0.6.0, ioos_qc 3.0.0 |
 | ROS 2 | not installed |
 
 ## Automated tests
 
 | Suite | Command | Result |
 |---|---|---|
-| Rust unit tests | `cargo test --release` | 4 passed |
+| Rust unit tests (incl. DSSE PAE spec example) | `cargo test --release` | 5 passed |
 | Rust evidence and fault tests (`crates/cursiv-evidence/tests/faults.rs`) | `cargo test --release` | 16 passed |
 | Clippy | `cargo clippy --release` | 0 warnings |
-| Python (`tests/test_sim.py`: network and input defences, token auth, ROS 2 mapping, Rust/Python Merkle agreement, demo, all 15 faults) | `python3 -m pytest tests -q` | 8 passed |
+| Python core (`tests/test_sim.py`: network and input defences, token auth, DSSE PAE, ROS 2 mapping, Rust/Python Merkle agreement, demo, all 15 faults) | `python3 -m pytest tests -q` | 9 passed, 4 interop skipped without optional packages |
+| Interoperability (`tests/test_interop.py`, optional packages installed) | `python3 -m pytest tests -q` | 4 passed: bagit-python validates packages and catches tampering; securesystemslib verifies every record and manifest as DSSE; a real ROS 2 CDR MCAP recording is imported, verified and traceable; QARTOD (ioos_qc 3.0.0) flags an implausible value and refuses a tampered package |
 | Fault suite (`python -m cursiv_sim.faults`) | real bridge binary + `cursiv-verify` | **15/15 scenarios passed** |
 | Demo (`python -m cursiv_sim.demo --steps 30`) | 11 steps | passed |
 
@@ -55,22 +56,24 @@ Clean package: all five verdicts pass. Edited copy: integrity fail (`file_change
 the resumed sync delivered 33, giving 90/90. Final package: all verdicts pass. 240 synthetic observations.
 Science found one contradiction group (the deliberately biased rover-03 thermometer against rover-02).
 
-## Performance (`python -m cursiv_sim.bench`; raw data: `bench/results/2026-11-05-linux-cloud-container.json`)
+## Performance (`python -m cursiv_sim.bench`; current format: DSSE records, BagIt packages)
 
-Configuration: queue 256, 8 HTTP workers, client threads = min(32, agents), batches of 100, fsync per
-coalesced batch. **Simulated agents are threads signing records on one computer, not robots.**
+Raw data: `bench/results/2026-11-05-linux-cloud-container-dsse-bagit.json` (the earlier
+custom-envelope run is kept in `bench/results/2026-11-05-linux-cloud-container.json`). Configuration: queue 256,
+8 HTTP workers, client threads = min(32, agents), batches of 100, fsync per coalesced batch.
+**Simulated agents are threads signing records on one computer, not robots.**
 
 | Agents | Records | Client signing (rec/s) | Ingest (rec/s) | Batch latency p50 / p95 (ms) | Verify incl. science (rec/s) | Store B/record | Payload B/record | Restart after kill (s) | Bridge peak RSS (MiB) | Bridge CPU (s) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 5,000 | 3,154 | 10,150 | 9.7 / 11.3 | 7,778 | 1,752 | 1,025 | 0.05 | 11.9 | 0.39 |
-| 3 | 9,000 | 3,406 | 12,517 | 23.7 / 27.8 | 8,222 | 1,751 | 1,025 | 0.10 | 14.6 | 0.72 |
-| 10 | 10,000 | 3,393 | 12,115 | 69.4 / 136.5 | 9,577 | 1,750 | 1,024 | 0.10 | 16.7 | 0.79 |
-| 100 | 20,000 | 3,422 | 12,437 | 247.3 / 294.5 | 8,753 | 1,749 | 1,023 | 0.20 | 21.4 | 1.67 |
-| 1,000 | 20,000 | 3,156 | 9,837 | 62.8 / 80.7 | 10,283 | 1,745 | 1,020 | 0.22 | 37.7 | 4.33 |
+| 1 | 5,000 | 2,808 | 9,145 | 10.64 / 12.38 | 7,822 | 1,961 | 1,025 | 0.052 | 13.2 | 0.44 |
+| 3 | 9,000 | 2,811 | 11,184 | 26.07 / 31.52 | 7,332 | 1,961 | 1,025 | 0.102 | 15.1 | 0.78 |
+| 10 | 10,000 | 2,937 | 10,935 | 78.26 / 143.85 | 7,838 | 1,959 | 1,024 | 0.102 | 17.2 | 0.91 |
+| 100 | 20,000 | 2,976 | 11,374 | 262.67 / 340.05 | 9,905 | 1,957 | 1,023 | 0.203 | 20.9 | 1.81 |
+| 1,000 | 20,000 | 3,079 | 8,601 | 73.25 / 86.51 | 9,634 | 1,951 | 1,020 | 0.254 | 38.1 | 4.62 |
 
-- Attachments: 50 × 1 MiB uploads at 217 MiB/s.
-- Sync after an outage: 5,000 buffered records delivered in 0.47 s.
-- Storage overhead: about 1.7× the payload (envelope, signature, public key, receipts). Store growth is linear.
+- Attachments: 50 × 1 MiB uploads at 198.5 MiB/s.
+- Sync after an outage: 5,000 buffered records delivered in 0.525 s.
+- Storage overhead: about 1.9× the payload. Moving to DSSE (base64 payload) raised it from about 1.75 KiB to 1.96 KiB per record; ingest and verify throughput are within run-to-run variation of the earlier run.
 - The single-threaded Python client (signing about 3,300 records/s) is slower than the bridge; batch latency at 10–100 agents is mostly queueing behind 32 concurrent client threads.
 
 ## Defect found by the benchmark and fixed

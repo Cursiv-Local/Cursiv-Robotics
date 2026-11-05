@@ -19,7 +19,9 @@ Alongside it:
 
 ## Integrity and trust
 
-- External anchoring of station checkpoints: an RFC 3161 timestamp authority, or a transparency log witnessed by another station. This closes the "station rewrites everything with its own key" gap.
+- External anchoring of station checkpoints in the **C2SP tlog-checkpoint** signed-note format, so independent **transparency-dev witnesses** (or a Tessera log) can cosign them; RFC 3161 timestamps as an alternative. This closes the "station rewrites everything with its own key" gap. Our Merkle tree is already RFC 6962-style; the leaf input must be fixed as the 32-byte record hash for tlog compatibility.
+- Optional submission of DSSE records to Sigstore Rekor, for projects that accept an online public log.
+- C2PA (Content Credentials) verification of camera images that carry manifests (c2pa-rs).
 - Hardware-backed keys: TPM 2.0 on PCs, secure elements on embedded boards, Windows DPAPI as Cursiv uses.
 - Signed key-rotation statements (old key authorises new key) instead of trust-store edits alone.
 - At-rest encryption of the store (reuse Cursiv's vault design).
@@ -28,12 +30,13 @@ Alongside it:
 
 | Target | Approach |
 |---|---|
-| ROS 2 | `rclpy` forwarder (exists, unverified); rosbag2 (MCAP) import with per-message provenance |
+| ROS 2 | MCAP import exists and is tested on real CDR messages; live `rclpy` forwarder exists, unverified |
 | MAVLink (drones) | read-only telemetry adapter via pymavlink; no command messages |
 | Underwater vehicles | adapters for vendor telemetry (e.g. Blue Robotics/ArduSub via MAVLink); sonar and imagery as attachments |
 | MQTT sensor networks | subscriber adapter; each sensor node holds its own key where possible |
 | Research stations | Cursiv Field Station (`cursiv_engine/station`) as the bridge host once it has been validated on hardware |
-| Metadata standards | map the observation model to OGC SensorThings / Observations & Measurements, W3C PROV for provenance, CF conventions for units and variables |
+| Metadata standards | export to OGC SensorThings (FROST-Server) and W3C PROV-JSON (`prov` library, MIT); CF conventions/UDUNITS for units; QARTOD flags as `resultQuality` |
+| Other black-box recorders | robot-black-box (MIT) shares the separate-verdict design; explore a shared DSSE-based exchange format |
 | Space data | review CCSDS (Space Packet Protocol, Bundle Protocol for delay-tolerant networking, CCSDS 650 OAIS for archives) before designing anything new; packages are already store-and-forward friendly |
 
 ## Scale and operations

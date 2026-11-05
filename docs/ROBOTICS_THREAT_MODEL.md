@@ -19,7 +19,9 @@ layer: robot motion or safety (out of scope by design).
 
 | Threat | Control | Tested |
 |---|---|---|
-| Altered record or measurement | Signature over payload bytes; chain; checkpoint Merkle root; manifest hashes | Rust `fault_1`, fault suite 1 |
+| Altered record or measurement | DSSE signature over PAE(type, body); chain; checkpoint Merkle root; signed manifest and BagIt fixity | Rust `fault_1`, fault suite 1, `test_interop` |
+| Key substitution via the envelope | DSSE carries no public key; `keyid` is unauthenticated and only selects a trust-store key | `faults.rs` (forged signature), crypto unit tests |
+| Cross-type replay (a record signature reused as a checkpoint) | `payloadType` is inside the signed PAE | crypto unit test |
 | Removed, inserted, reordered records | `seq`/`prev` chain; trusted checkpoints for trailing removal | Rust `fault_3`, suite 3 |
 | Rebuilt hash chain (re-signed with attacker key) | Trust store rejects the key; genuine station checkpoint disagrees; no trust store gives "not_assessed", never "pass" | Rust `faults_10_11`, suite 11 |
 | Identity spoofing / impostor robot | Per-robot keys in trust store; `403 untrusted_key` + incident | Rust `fault_12`, suite 12 |

@@ -27,6 +27,19 @@ Windows (PowerShell), same steps: `cargo build --release`, `py -m pip install cr
 iteration. On Windows the robot key file's 0600 permission request has no effect, and the benchmark
 cannot read the bridge's memory and CPU figures (it reports "not measured").
 
+Optional interoperability extras (about 400 MB, mostly numpy/pandas/xarray for ioos_qc):
+
+```bash
+python3 -m pip install bagit securesystemslib mcap mcap-ros2-support ioos_qc
+python3 -m pytest tests/test_interop.py -q                    # BagIt, DSSE, ROS 2 MCAP, QARTOD
+cd python && python3 -m cursiv_sim.qartod ../runs/demo/store/exports/survey-final --trust ../runs/demo/trust.json
+```
+
+QARTOD note: the simulation compresses a survey into seconds, so readings are milliseconds apart. With
+per-second rate-of-change thresholds this makes most simulated air-temperature readings SUSPECT, and the
+flat-line test cannot run (reported as not evaluated). This is an artifact of simulated time, not a finding;
+real deployments need thresholds from the instrument and the relevant QARTOD manual.
+
 ## What the demo does
 
 | Step | What happens | Where to look |

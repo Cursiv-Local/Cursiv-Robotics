@@ -8,12 +8,17 @@ append-only logs. Anyone can later check an exported evidence package with a sta
 without the service, a GUI or an AI model. Integrity, authenticity, completeness and scientific
 plausibility are reported **separately**. A valid signature never means a measurement is correct.
 
+It builds on existing standards rather than inventing formats. Records are **DSSE** envelopes
+(the in-toto/Sigstore format), packages are **BagIt** bags (RFC 8493), sensor QC uses
+**IOOS QARTOD** via `ioos_qc`, and ROS 2 recordings import from **MCAP**. See the
+[prior-art research](docs/ROBOTICS_PRIOR_ART.md).
+
 Cursiv Robotics does not move, steer or command robots. It sits beside the manufacturer's
 navigation and safety systems and only records what they report.
 
 **Status: first milestone.** Three simulated research robots submit independently verifiable
 observations. Deliberately corrupted evidence is detected (15/15 fault scenarios). Nothing has run on
-physical robots yet. Live ROS 2 integration is unverified, and Windows has not been tested yet.
+physical robots yet. ROS 2 message encoding is tested through MCAP; live ROS 2 (DDS) is unverified, and Windows has not been tested yet.
 
 ```bash
 cargo build --release
@@ -24,6 +29,7 @@ cd python && python3 -m cursiv_sim.demo        # 11-step demonstration, all data
 | Document | |
 |---|---|
 | [Code audit](docs/ROBOTICS_CODE_AUDIT.md) | What Cursiv has, what was reused, what was missing |
+| [Prior art](docs/ROBOTICS_PRIOR_ART.md) | Existing open-source projects and standards, and what was adopted |
 | [Architecture](docs/ROBOTICS_ARCHITECTURE.md) | Components, data model, trade-offs |
 | [Threat model](docs/ROBOTICS_THREAT_MODEL.md) | Trust boundaries, controls, residual risks |
 | [API](docs/ROBOTICS_API.md) · [OpenAPI](docs/openapi.json) | Ingestion API and CLIs |

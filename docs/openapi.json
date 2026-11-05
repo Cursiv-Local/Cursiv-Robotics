@@ -23,27 +23,41 @@
         "type": "object",
         "required": [
           "payload",
-          "key_id",
-          "public_key",
-          "signature"
+          "payloadType",
+          "signatures"
         ],
-        "additionalProperties": false,
+        "description": "DSSE envelope (secure-systems-lab/dsse). Signature over PAE(payloadType, base64-decoded payload).",
         "properties": {
           "payload": {
             "type": "string",
-            "description": "Exact UTF-8 JSON text that was signed (a cursiv-record-1 or cursiv-checkpoint-1)."
+            "description": "Base64 of the exact JSON body (cursiv-record-1 or cursiv-checkpoint-1)"
           },
-          "key_id": {
+          "payloadType": {
             "type": "string",
-            "pattern": "^[0-9a-f]{16}$"
+            "enum": [
+              "application/vnd.cursiv.record.v1+json",
+              "application/vnd.cursiv.checkpoint.v1+json"
+            ]
           },
-          "public_key": {
-            "type": "string",
-            "description": "Base64 raw Ed25519 public key"
-          },
-          "signature": {
-            "type": "string",
-            "description": "Base64 Ed25519 signature over payload bytes"
+          "signatures": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "keyid",
+                "sig"
+              ],
+              "properties": {
+                "keyid": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{16}$"
+                },
+                "sig": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       },
@@ -442,7 +456,7 @@
     },
     "/v1/exports": {
       "post": {
-        "summary": "Write a station-signed evidence package under <store>/exports/<name>",
+        "summary": "Write a station-signed evidence package (a BagIt bag) under <store>/exports/<name>",
         "requestBody": {
           "required": true,
           "content": {

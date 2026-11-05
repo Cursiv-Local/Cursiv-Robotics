@@ -13,16 +13,20 @@ Base URL: `http://127.0.0.1:8750`. Version 1 paths are stable; breaking changes 
 
 ## Signed envelopes
 
-Everything a robot submits is an envelope:
+Everything a robot submits is a **DSSE envelope** (secure-systems-lab/dsse; the format in-toto and Sigstore use):
 
 ```json
-{"payload": "<exact JSON text>", "key_id": "<16 hex>", "public_key": "<base64 raw Ed25519>", "signature": "<base64>"}
+{"payload": "<base64 of the exact JSON body>", "payloadType": "application/vnd.cursiv.record.v1+json",
+ "signatures": [{"keyid": "<16 hex>", "sig": "<base64 Ed25519 over PAE(payloadType, body)>"}]}
 ```
 
-`key_id` = first 16 hex characters of SHA-256(raw public key). The signature is over the
-UTF-8 bytes of `payload`. Record hash = SHA-256(payload bytes).
+`PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body` (LEN is the ASCII decimal byte length).
+`keyid` = first 16 hex characters of SHA-256(raw public key). It is unauthenticated: the bridge and the verifier
+look the key up in the trust store and verify with that key. Record hash = SHA-256(body bytes).
+Payload types: `application/vnd.cursiv.record.v1+json`, `…checkpoint.v1+json`, `…station-checkpoint.v1+json`,
+`…package-manifest.v1+json`. A signature for one type cannot be replayed as another.
 
-Record payload (`cursiv-record-1`):
+Record body (`cursiv-record-1`):
 
 ```json
 {"schema":"cursiv-record-1","robot_id":"rover-02","seq":4,"prev":"<hash of record 3 or 'genesis'>",
@@ -55,7 +59,7 @@ uncertainty `kind` ∈ `standard, expanded (with coverage_k), bound`; unknown fi
 | POST | `/v1/checkpoints` | Robot-signed checkpoint | 201, 409 equivocation |
 | PUT | `/v1/attachments/{sha256}` | Raw bytes; must match hash and length | 201, 200 present, 400, 411, 413 |
 | GET | `/v1/attachments/{sha256}` | Presence | 200, 404 |
-| POST | `/v1/exports` | `{"name"}` → station-signed package under `<store>/exports/<name>` | 201, 400, 409 |
+| POST | `/v1/exports` | `{"name"}` → station-signed BagIt package under `<store>/exports/<name>` | 201, 400, 409 |
 | POST | `/v1/verify` | `{"package"}` → the verifier's report (same code as the CLI) | 200, 400 |
 
 Per-record outcome: `{"status":"accepted|duplicate|rejected","robot_id","seq","record_hash","missing_attachments"}`
@@ -87,9 +91,27 @@ cursiv-verify cursiv-export <dir> [--key-id <16 hex>] [--json]      # existing C
 `status` ∈ `active`, `retired` (verifies history inside its window), `revoked` (verifies nothing).
 Rotation: retire the old key with `valid_until_seq = N`, add the new one with `valid_from_seq = N+1`.
 
+## Evidence package layout (BagIt, RFC 8493)
+
+```
+bagit.txt  bag-info.txt  manifest-sha256.txt  tagmanifest-sha256.txt   BagIt tag files (any BagIt tool can check fixity)
+manifest.json                       station-signed DSSE list of every data/ file
+data/robots/<id>/records.jsonl      robot-signed DSSE records, as received
+data/robots/<id>/checkpoints.jsonl  robot-signed checkpoints
+data/receipts.jsonl  data/station-checkpoint.json  data/blobs/sha256/<hex>  data/keys/public-keys.json  data/README.txt
+```
+
+`data/keys/public-keys.json` lets a verifier without a trust store check integrity relative to the listed keys; it
+never establishes authenticity.
+
+## Optional adapters
+
+- `python -m cursiv_sim.qartod <package> --trust trust.json`: IOOS QARTOD QC with `ioos_qc`, only on packages that pass verification.
+- `cursiv_sim.mcap_import.import_mcap(path, agent, {topic: sensor})`: ROS 2 MCAP recordings to signed observations, with the recording attached.
+
 ## ROS 2 adapter boundary
 
 `python/cursiv_sim/ros2_adapter.py` maps `sensor_msgs/msg/{Temperature, RelativeHumidity, FluidPressure, Image}` and
 `NavSatFix` (location) into observations. A ROS variance of 0 means unknown, so the uncertainty is set to null. ROS stamps get
 `time_source: "unknown"` unless the caller states otherwise. Unit conversions are recorded in `processing`. The
-`Ros2Forwarder` node only subscribes. **Live ROS 2 operation is unverified**: no ROS 2 installation was available.
+`Ros2Forwarder` node only subscribes. ROS 2 **message encoding** is verified through MCAP recordings (`tests/test_interop.py`). **Live ROS 2 (DDS/rclpy) operation is unverified**: no ROS 2 installation was available.

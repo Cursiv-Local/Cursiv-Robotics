@@ -26,6 +26,8 @@ decisions, and no component can command an actuator.
 | Robotics bridge | Rust | `crates/cursiv-bridge` | Headless loopback HTTP service (`docs/openapi.json`) |
 | Verification | Rust | `crates/cursiv-verify` | Standalone CLI; no service, GUI or AI |
 | Simulation lab | Python | `python/cursiv_sim` | Robot agents, three rovers, faults, demo, benchmarks, ROS 2 boundary |
+| QARTOD QC adapter | Python | `python/cursiv_sim/qartod.py` | IOOS QARTOD via `ioos_qc` (optional), on verified packages only |
+| MCAP import | Python | `python/cursiv_sim/mcap_import.py` | ROS 2 recordings via `mcap-ros2-support` (optional) |
 | Research interface | — | not built | Roadmap: a read-only viewer over packages and reports |
 
 Why Rust for the core: the verifier must be a small, dependency-light, memory-safe
@@ -40,7 +42,10 @@ is not migrated or modified.
 - **Record** (`cursiv-record-1`): `{robot_id, seq, prev, written_time, observation}`. Signed by the robot.
 - **Checkpoint** (`cursiv-checkpoint-1`): `{robot_id, count, head, merkle_root}`. Signed by the robot.
 - **Receipt** (`cursiv-receipt-1`): the station's chained note of when each record arrived.
-- **Envelope**: `{payload, key_id, public_key, signature}`. The signature covers the exact payload bytes, so no component re-serialises JSON to verify.
+- **Envelope**: DSSE (`{payload (base64), payloadType, signatures[{keyid, sig}]}`, signature over PAE). This is the in-toto/Sigstore format, verified with securesystemslib. No component re-serialises JSON to verify. Keys come from the trust store, never from the envelope.
+- **Package**: a BagIt bag (RFC 8493) with a station-signed DSSE `manifest.json`, so archives can check fixity with standard tools.
+
+Standards adopted instead of inventing formats: see `docs/ROBOTICS_PRIOR_ART.md`.
 
 ## Integrity, authenticity, accuracy, reliability
 
@@ -68,7 +73,7 @@ is not migrated or modified.
 
 ## Trade-offs and decisions
 
-- **Signature per record** costs about 1 KiB of envelope per record (store about 1.7 KiB/record against a 1.0 KiB payload) but lets any subset be checked and pins authorship at the source, not at the station.
+- **Signature per record** costs about 0.9 KiB per record (store about 1.96 KiB/record against a 1.0 KiB payload, after DSSE's base64) but lets any subset be checked and pins authorship at the source, not at the station.
 - **JSONL instead of a database**: inspectable, appendable, trivially exportable; indexes are rebuilt in memory at start (0.2 s for 20,000 records measured). Very large stores will need segment files and on-disk indexes (roadmap).
 - **Trust store as a file**, reloaded at restart: simple and auditable; no enrollment over the network in this version.
 - **Science checks are deterministic and profile-driven**: transparent and reproducible, but only as good as the stated profile. Work is bounded (2 million comparisons, 50 listed flags per sensor pair) because the benchmark showed an unbounded check could be driven out of memory.
