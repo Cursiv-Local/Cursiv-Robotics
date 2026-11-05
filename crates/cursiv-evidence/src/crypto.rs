@@ -163,7 +163,7 @@ impl Identity {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let tmp = path.with_extension("tmp");
+        let tmp = crate::store::unique_tmp(path.parent().unwrap_or(Path::new(".")), "key");
         {
             let mut opts = fs::OpenOptions::new();
             opts.write(true).create_new(true);

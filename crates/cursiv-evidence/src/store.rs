@@ -22,6 +22,26 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A temp-file name no other writer (thread or process) can be using.
+pub(crate) fn unique_tmp(dir: &Path, stem: &str) -> PathBuf {
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    dir.join(format!("{stem}.{}.{t}.{n}.tmp", std::process::id()))
+}
+
+fn tree_bytes(p: &Path) -> u64 {
+    let Ok(rd) = fs::read_dir(p) else { return 0 };
+    rd.flatten().map(|e| match e.file_type() {
+        Ok(t) if t.is_dir() => tree_bytes(&e.path()),
+        Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+        _ => 0,
+    }).sum()
+}
 
 pub const RECEIPT_SCHEMA: &str = "cursiv-receipt-1";
 
@@ -66,6 +86,8 @@ impl Outcome {
             Outcome::Rejected { code, .. } => match code.as_str() {
                 "bad_signature" | "malformed" => 400,
                 "untrusted_key" | "revoked_key" | "key_out_of_window" => 403,
+                "storage_full" => 507,
+                "store_failed" => 503,
                 "invalid_observation" | "unknown_correction_target" => 422,
                 _ => 409,
             },
@@ -95,6 +117,12 @@ pub struct Store {
     receipt_hashes: Vec<String>,
     pub recovery_notes: Vec<String>,
     pub max_attachment_bytes: u64,
+    /// Set after a failed write. In-memory state may then be ahead of disk, so every further
+    /// write is refused until the service restarts and rebuilds its state from disk.
+    failed: Option<String>,
+    /// Optional limit on the store's total size (records, receipts, attachments).
+    quota: Option<u64>,
+    used: Arc<AtomicU64>,
 }
 
 fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()> {
@@ -169,6 +197,7 @@ impl Store {
             root: root.to_path_buf(), station_id: station_id.into(), station, trust,
             robots: BTreeMap::new(), receipt_hashes: Vec::new(), recovery_notes: Vec::new(),
             max_attachment_bytes: 256 * 1024 * 1024,
+            failed: None, quota: None, used: Arc::new(AtomicU64::new(0)),
         };
         let mut notes = Vec::new();
         for e in fs::read_dir(root.join("robots")).map_err(|e| e.to_string())?.flatten() {
@@ -220,7 +249,34 @@ impl Store {
             }
         }
         s.recovery_notes = notes;
+        s.used.store(tree_bytes(root), Ordering::Relaxed);
         Ok(s)
+    }
+
+    /// Refuse writes that would take the store past `bytes` (HTTP 507), before anything changes.
+    pub fn set_quota(&mut self, bytes: Option<u64>) {
+        self.quota = bytes;
+    }
+
+    pub fn used_bytes(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    pub fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    /// Replace the trust store (operator action). Records already stored are not re-judged;
+    /// the verifier judges packages against whichever trust store it is given.
+    pub fn set_trust(&mut self, trust: TrustStore) {
+        self.trust = trust;
+    }
+
+    fn fail(&mut self, what: String) -> String {
+        let msg = format!("{what}; the store stopped accepting writes. Restart the service: it recovers from what is on disk");
+        self.incident("store_failed", None, &msg);
+        self.failed = Some(msg.clone());
+        msg
     }
 
     pub fn root(&self) -> &Path {
@@ -332,6 +388,17 @@ impl Store {
     /// Ingest a batch. Accepted records are written and fsynced before this returns.
     /// Each envelope gets its own outcome; one bad record does not block the others.
     pub fn ingest_batch(&mut self, envs: &[Envelope]) -> Result<Vec<Outcome>, String> {
+        if let Some(f) = &self.failed {
+            return Err(f.clone());
+        }
+        if let Some(q) = self.quota {
+            // envelope bytes plus a receipt line each; checked before any state changes
+            let need: u64 = envs.iter().map(|e| e.payload.len() as u64 + 400).sum();
+            if self.used_bytes() + need > q {
+                return Ok(envs.iter().map(|_| Outcome::reject("storage_full", format!(
+                    "the store is at its {q}-byte quota ({} used); nothing was written. Free space or raise --max-store-bytes, then resend", self.used_bytes()))).collect());
+            }
+        }
         let mut outcomes = Vec::with_capacity(envs.len());
         let mut per_robot: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut receipts = Vec::new();
@@ -356,20 +423,27 @@ impl Store {
             }
         }
         // Records first, then receipts: a crash in between is repaired at the next open().
+        // Any write failure (disk full, I/O error) stops the store: memory is now ahead of disk.
+        let written: u64 = per_robot.values().flatten().chain(receipts.iter()).map(|l| l.len() as u64 + 1).sum();
         for (rid, lines) in &per_robot {
             let dir = self.root.join("robots").join(rid);
-            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            if let Err(e) = append_lines(&dir.join("records.jsonl"), lines) {
-                return Err(format!("write failed for {rid}: {e}; restart the service to recover"));
+            if let Err(e) = fs::create_dir_all(&dir).and_then(|_| append_lines(&dir.join("records.jsonl"), lines)) {
+                return Err(self.fail(format!("write failed for {rid}: {e}")));
             }
         }
-        append_lines(&self.root.join("receipts.jsonl"), &receipts).map_err(|e| e.to_string())?;
+        if let Err(e) = append_lines(&self.root.join("receipts.jsonl"), &receipts) {
+            return Err(self.fail(format!("receipt write failed: {e}")));
+        }
+        self.used.fetch_add(written, Ordering::Relaxed);
         Ok(outcomes)
     }
 
     /// A robot's signed checkpoint. Accepted when it agrees with what was received,
     /// or when it claims records not yet received (which proves they are missing).
     pub fn ingest_checkpoint(&mut self, env: &Envelope) -> Outcome {
+        if let Some(f) = &self.failed {
+            return Outcome::reject("store_failed", f.clone());
+        }
         if env.payload_type != crate::crypto::CHECKPOINT_TYPE {
             return Outcome::reject("malformed", format!("payloadType must be {}", crate::crypto::CHECKPOINT_TYPE));
         }
@@ -409,7 +483,8 @@ impl Store {
     }
 
     pub fn blobs(&self) -> BlobStore {
-        BlobStore { root: self.root.clone(), max_bytes: self.max_attachment_bytes }
+        BlobStore { root: self.root.clone(), max_bytes: self.max_attachment_bytes, quota: self.quota, used: self.used.clone(),
+                    failed: self.failed.is_some() }
     }
 
     pub fn robot_count(&self, robot_id: &str) -> u64 {
@@ -481,6 +556,9 @@ pub(crate) fn copy_hashed(src: &Path, dest: &Path) -> Result<(String, u64), Stri
 pub struct BlobStore {
     root: PathBuf,
     pub max_bytes: u64,
+    quota: Option<u64>,
+    used: Arc<AtomicU64>,
+    failed: bool,
 }
 
 impl BlobStore {
@@ -494,7 +572,14 @@ impl BlobStore {
         if dest.is_file() {
             return Ok(false);
         }
-        let tmp = self.root.join("blobs/tmp").join(format!("{expected_sha}.{}", std::process::id()));
+        if self.failed {
+            return Err((503, "the store stopped accepting writes after a failure; restart the service".into()));
+        }
+        if self.quota.is_some_and(|q| self.used.load(Ordering::Relaxed) + expected_len > q) {
+            return Err((507, "storing this attachment would exceed the store's quota; nothing was written".into()));
+        }
+        // unique per upload: two concurrent uploads of the same attachment must not share a temp file
+        let tmp = unique_tmp(&self.root.join("blobs/tmp"), expected_sha);
         let mut f = File::create(&tmp).map_err(|e| (500, e.to_string()))?;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 64 * 1024];
@@ -531,7 +616,13 @@ impl BlobStore {
         if let Err(e) = f.sync_all() {
             return fail((500, e.to_string()));
         }
+        if dest.is_file() {
+            // another upload of the same bytes finished first; content addressing makes them identical
+            let _ = fs::remove_file(&tmp);
+            return Ok(false);
+        }
         fs::rename(&tmp, &dest).map_err(|e| (500, e.to_string()))?;
+        self.used.fetch_add(expected_len, Ordering::Relaxed);
         Ok(true)
     }
 

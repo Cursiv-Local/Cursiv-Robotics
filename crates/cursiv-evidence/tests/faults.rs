@@ -610,3 +610,88 @@ fn findings_are_checked_against_the_evidence_they_cite() {
         assert!(rs.flags.iter().any(|f| f.code == code), "missing {code}");
     }
 }
+
+// ---- reliability: storage exhaustion, failed writes, concurrent uploads, atomic export ------
+
+#[test]
+fn storage_quota_refuses_cleanly_and_nothing_changes() {
+    let mut l = lab("quota");
+    l.survey(2);
+    let used = l.store.used_bytes();
+    l.store.set_quota(Some(used + 500));
+    let r = &mut l.robots[0];
+    let envs: Vec<Envelope> = (10..14).map(|k| { let o = r.obs(k, "air_temperature", 1.0, "2026-11-05T10:00:00Z"); r.record(o) }).collect();
+    let out = l.store.ingest_batch(&envs).unwrap();
+    assert!(out.iter().all(|o| matches!(o, Outcome::Rejected { code, .. } if code == "storage_full")), "{out:?}");
+    assert_eq!(out[0].http_status(), 507);
+    assert_eq!(l.store.robot_count("rover-01"), 2, "nothing admitted");
+    let blob = vec![1u8; 10_000];
+    assert_eq!(l.store.blobs().put(&blob[..], &sha256_hex(&blob), blob.len() as u64).unwrap_err().0, 507);
+    l.store.set_quota(None);
+    assert!(l.store.ingest_batch(&envs).unwrap().iter().all(|o| matches!(o, Outcome::Accepted { .. })), "resend after freeing space works");
+}
+
+#[test]
+fn a_failed_write_stops_the_store_and_restart_recovers_from_disk() {
+    let mut l = lab("failstop");
+    l.survey(3);
+    let f = l.dir.join("store/robots/rover-01/records.jsonl");
+    let aside = l.dir.join("aside.jsonl");
+    fs::rename(&f, &aside).unwrap();
+    fs::create_dir(&f).unwrap(); // the next append cannot open the file: an I/O failure
+    let r = &mut l.robots[0];
+    let o = r.obs(50, "air_temperature", 1.0, "2026-11-05T10:00:00Z");
+    let e = r.record(o);
+    assert!(l.store.ingest_batch(&[e.clone()]).is_err());
+    assert!(l.store.failed().is_some());
+    assert!(l.store.ingest_batch(&[e.clone()]).is_err(), "no further writes once memory may be ahead of disk");
+    assert!(matches!(l.store.ingest_checkpoint(&l.robots[1].checkpoint()), Outcome::Rejected { ref code, .. } if code == "store_failed"));
+    fs::remove_dir(&f).unwrap();
+    fs::rename(&aside, &f).unwrap();
+    let mut store = Store::open(&l.dir.join("store"), "station-a", Identity::from_seed(l.station), l.trust.clone()).unwrap();
+    assert_eq!(store.robot_count("rover-01"), 3, "state rebuilt from disk; the failed record was never stored");
+    assert!(matches!(store.ingest_batch(&[e]).unwrap()[0], Outcome::Accepted { .. }), "and can now be resent");
+}
+
+#[test]
+fn concurrent_uploads_of_the_same_attachment_do_not_corrupt_it() {
+    let l = lab("uploads");
+    let blob: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let sha = sha256_hex(&blob);
+    let blobs = l.store.blobs();
+    let handles: Vec<_> = (0..8).map(|_| {
+        let (b, data, sha) = (blobs.clone(), blob.clone(), sha.clone());
+        std::thread::spawn(move || b.put(&data[..], &sha, data.len() as u64))
+    }).collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results.iter().all(|r| r.is_ok()), "{results:?}");
+    assert_eq!(results.iter().filter(|r| matches!(r, Ok(true))).count() >= 1, true);
+    assert_eq!(sha256_hex(&fs::read(l.dir.join("store/blobs/sha256").join(&sha)).unwrap()), sha);
+    assert!(fs::read_dir(l.dir.join("store/blobs/tmp")).unwrap().next().is_none());
+}
+
+#[test]
+fn an_interrupted_export_leaves_no_package_behind() {
+    let mut l = lab("atomic-export");
+    l.survey(2);
+    fs::create_dir(l.dir.join("store/blobs/sha256").join("not-a-file")).unwrap(); // copying it fails mid-export
+    let dest = l.dir.join("exports/pkg");
+    assert!(l.store.export(&dest).is_err());
+    assert!(!dest.exists());
+    assert!(fs::read_dir(l.dir.join("exports")).unwrap().next().is_none(), "no partial folder left");
+    fs::remove_dir(l.dir.join("store/blobs/sha256/not-a-file")).unwrap();
+    l.store.export(&dest).unwrap();
+    assert!(l.store.export(&dest).is_err(), "never overwrites an existing package");
+    assert!(l.verify(&dest).all_pass());
+}
+
+#[test]
+fn trust_store_reload_takes_effect_immediately() {
+    let mut l = lab("reload");
+    let mut t = l.trust.clone();
+    t.robots.get_mut("rover-01").unwrap()[0].status = "revoked".into();
+    l.store.set_trust(t);
+    let r = &mut l.robots[0];
+    let e = r.record(r.obs(1, "air_temperature", 1.0, "2026-11-05T10:00:00Z"));
+    assert!(matches!(l.store.ingest_batch(&[e]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "revoked_key"));
+}

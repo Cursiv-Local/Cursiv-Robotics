@@ -158,3 +158,42 @@ def test_all_seventeen_fault_scenarios(tmp_path):
     assert faults.main(["--out", str(tmp_path / "faults")]) == 0
     r = json.loads((tmp_path / "faults/fault-results.json").read_text())
     assert r["total"] == 17 and r["passed"] == 17
+
+
+def test_bridge_storage_quota_and_live_trust_reload(tmp_path):
+    lab = Lab(tmp_path / "q", ["rover-01"])
+    lab.enrol()
+    import time
+    proc = subprocess.Popen([str(binary("cursiv-bridge")), "serve", "--store", str(lab.dir / "store"), "--station-id", lab.station_id,
+                             "--key", str(lab.station_key), "--trust", str(lab.trust_path), "--bind", f"127.0.0.1:{lab.port}",
+                             "--max-store-bytes", "40000"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for _ in range(100):
+            try:
+                if lab.client.get("/v1/health")[0] == 200:
+                    break
+            except ConnectionError:
+                time.sleep(0.05)
+        g = RobotAgent("rover-01", lab.robot_state, lab.client, mission_id="m")
+        s = {"sensor_id": "rover-01-t", "sensor_type": "rtd", "model": None, "calibration": None}
+        for _ in range(60):
+            g.record(g.observation("air_temperature", sensor=s, value=1.0, unit="degC", uncertainty=0.1, lat=45.1, lon=-122.2))
+        seen = []
+        for i in range(0, 60, 5):          # a batch is admitted whole or refused whole (nothing half-written)
+            status, data, _ = lab.client.submit(g.envelopes[i:i + 5])
+            seen.append((status, {r.get("code") or r["status"] for r in data["results"]}))
+            if status == 507:
+                break
+        assert seen[0][1] == {"accepted"} and seen[-1] == (507, {"storage_full"}), seen
+        stored = lab.client.get("/v1/robots/rover-01/head")[1]["count"]
+        assert stored == 5 * (len(seen) - 1), "everything before the quota stored, nothing after it"
+        # operator revokes the robot's key and reloads the trust store without restarting
+        trust = json.loads(lab.trust_path.read_text())
+        trust["robots"]["rover-01"][0]["status"] = "revoked"
+        lab.trust_path.write_text(json.dumps(trust))
+        assert lab.client.post("/v1/trust/reload", {})[0] == 200
+        lab.trust_path.write_text("{not json")
+        assert lab.client.post("/v1/trust/reload", {})[0] == 400, "a broken trust file is refused; the current one stays"
+    finally:
+        proc.terminate()
+        proc.wait()

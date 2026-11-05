@@ -31,12 +31,29 @@ pub fn safe_rel(name: &str) -> bool {
         && p.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
+/// Atomic: the package is built in a hidden sibling folder and renamed into place only when
+/// complete, so an interrupted export never leaves a partial package under the final name.
 pub(crate) fn export(store: &Store, dest: &Path, station: &Identity) -> Result<serde_json::Value, String> {
     if dest.exists() {
         return Err(format!("{} already exists; choose a new folder", dest.display()));
     }
-    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let bag = dest;
+    let parent = dest.parent().ok_or("export path has no parent folder")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let partial = crate::store::unique_tmp(parent, &format!(".partial-{name}"));
+    let result = export_into(store, &partial, station).and_then(|mut v| {
+        fs::rename(&partial, dest).map_err(|e| format!("could not finish the export: {e}"))?;
+        v["path"] = dest.display().to_string().into();
+        Ok(v)
+    });
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&partial);
+    }
+    result
+}
+
+fn export_into(store: &Store, bag: &Path, station: &Identity) -> Result<serde_json::Value, String> {
+    fs::create_dir_all(bag).map_err(|e| e.to_string())?;
     let dest = &bag.join("data");
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let root = store.root();
