@@ -68,3 +68,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --locked
       - run: cargo audit
+
+  ros2:
+    name: ROS 2 Jazzy integration (simulated publishers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ROS 2 Jazzy (ros-base, sensor_msgs)
+        run: |
+          sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/ros2.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ros-jazzy-ros-base ros-jazzy-sensor-msgs python3-cryptography
+      - run: cargo build --release --locked
+      - name: Test dependencies
+        run: python3 -m pip install --break-system-packages pytest mcap mcap-ros2-support
+      - name: Live ROS 2 graph test, capture core and MCAP tests
+        env:
+          CURSIV_ROS_PYTHON: /usr/bin/python3
+        run: python3 -m pytest tests/test_ros2.py tests/test_ros2_core.py tests/test_mcap.py -v
