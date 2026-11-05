@@ -105,3 +105,10 @@ def test_cursiv_document_library_ingests_the_research_summary(mission, tmp_path)
     assert out.returncode == 0, out.stderr[-500:]
     r = json.loads(out.stdout.strip().splitlines()[-1])
     assert r["pages"] >= 1 and "dissolved_oxygen_mean" in r["hit"]
+
+
+def test_one_command_demo_passes(tmp_path):
+    out = subprocess.run([sys.executable, str(ROOT / "python/cursiv_demo"), "--out", str(tmp_path / "demo")], capture_output=True, text=True, timeout=600)
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert "tampering DETECTED" in out.stdout and "DEMO PASSED" in out.stdout
+    assert "REFUSED" in out.stdout and "source unchanged: False" not in out.stdout

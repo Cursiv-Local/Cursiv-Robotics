@@ -270,6 +270,7 @@ class Mission:
             (self.out / "result.json").write_text(json.dumps(result, indent=2))
             report = write_report(self.out, cfg, pkg, verification, stats, self.events, result)
             result["report"] = str(report)
+            result["package"], result["trust"] = str(pkg), str(lab.trust_path)
             return result
         finally:
             lab.stop()
@@ -385,7 +386,10 @@ def write_report(out: Path, cfg: dict, pkg: Path, v: dict, stats: dict, events: 
            "## Platforms", "", "| Platform | Kind | Records | Sensors |", "|---|---|---|---|"]
     for p in cfg["platforms"]:
         md.append(f"| {p['robot_id']} | {p['kind']} | {ver['robots'].get(p['robot_id'], {}).get('records', 0)} | {', '.join(p['sensors'])} |")
-    md += ["", "## Results (each value cites its signed record)", "", "| Series | n | Mean | Std. uncertainty of mean | Citation | Example inputs |", "|---|---|---|---|---|---|"]
+    md += ["", "## Results (each value cites its signed record)", "",
+           "Each mean uses every reading in its series, including readings flagged under Anomalies (for example, an expired calibration). "
+           "The uncertainty is the GUM first-order propagation of the stated per-reading uncertainties, assuming uncorrelated inputs; "
+           "it does not include calibration bias or drift.", "", "| Series | n | Mean | Std. uncertainty of mean | Citation | Example inputs |", "|---|---|---|---|---|---|"]
     for k, s in stats.items():
         md.append(f"| {k} | {s['n']} | {s['mean']:.4g} {s['unit']} | {('%.2g ' % s['u']) + s['unit'] if s['u'] is not None else 'unknown'} | `{s['id']}` | {', '.join('`' + i + '`' for i in s['inputs'])} |")
     md += ["", "## Anomalies and uncertainties", ""]

@@ -34,6 +34,13 @@ jobs:
         run: python -m pip install pytest cryptography bagit securesystemslib
       - name: Python tests (simulation lab, virtual missions vs documented results, phone importer, integration, interop)
         run: python -m pytest tests -q
+      - name: One-command demo (PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\demo.ps1
+      - name: One-command demo (sh)
+        if: runner.os != 'Windows'
+        run: sh scripts/demo.sh
       - name: Benchmark (software on the CI runner, not robot hardware)
         shell: bash
         run: cargo run --release --locked -p cursiv-evidence --example bench -- 5000 3 bench-${{ matrix.os }}.json
@@ -48,4 +55,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82
-      - run: cargo build --locked --workspace
+      - run: cargo test --locked --workspace
+
+  audit:
+    name: Dependency advisories (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

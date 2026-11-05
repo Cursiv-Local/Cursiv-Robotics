@@ -435,9 +435,14 @@ fn hostile_package_paths_and_links_are_refused() {
     let p = l.export("pkg");
     fs::create_dir_all(p.join("data/blobs/sha256")).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink("/etc/passwd", p.join("data/blobs/sha256/link")).unwrap();
-    let r = l.verify(&p);
-    assert_eq!(r.verdicts.structure, "fail");
+    let linked = std::os::unix::fs::symlink("/etc/passwd", p.join("data/blobs/sha256/link")).is_ok();
+    // Windows only lets administrators or Developer Mode create symbolic links; without one there is nothing to test.
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file("C:\\Windows\\win.ini", p.join("data/blobs/sha256/link")).is_ok();
+    if linked {
+        assert_eq!(l.verify(&p).verdicts.structure, "fail", "a symbolic link inside a package is refused");
+        fs::remove_file(p.join("data/blobs/sha256/link")).unwrap();
+    }
     // manifest naming ../ paths
     let m: Envelope = serde_json::from_str(&fs::read_to_string(p.join("manifest.json")).unwrap()).unwrap();
     let mut body: serde_json::Value = serde_json::from_str(&m.body_text().unwrap()).unwrap();

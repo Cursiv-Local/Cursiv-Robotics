@@ -48,6 +48,10 @@ GPS = {"latitude": "lat", "longitude": "lon", "height": "alt", "altitude": "alt"
        "vertical accuracy": "vacc", "velocity": "speed", "speed": "speed", "direction": "heading", "satellites": "sats"}
 
 
+MAX_UNPACKED = 1024**3        # 1 GiB in total
+MAX_MEMBER = 256 * 1024**2    # 256 MiB per file (phyphox CSVs are usually kilobytes to megabytes)
+MAX_MEMBERS = 1000
+
 def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")[:60] or "value"
 
@@ -114,9 +118,13 @@ def read(path: Path) -> Export:
     exp = Export(path=path, sha256=sha256_hex(data), size=len(data), sets=[])
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
+            # Decompression limits. zipfile never reads past a member's declared size (and checks its
+            # CRC), so bounding the declared sizes bounds what is actually decompressed.
             total = sum(i.file_size for i in z.infolist())
-            if total > 2 * 1024**3 or len(z.infolist()) > 1000:
-                raise ValueError(f"{path.name}: refusing an export that unpacks to {total} bytes / {len(z.infolist())} files")
+            biggest = max((i.file_size for i in z.infolist()), default=0)
+            if total > MAX_UNPACKED or biggest > MAX_MEMBER or len(z.infolist()) > MAX_MEMBERS:
+                raise ValueError(f"{path.name}: refusing an export that unpacks to {total} bytes / {len(z.infolist())} files "
+                                 f"(largest {biggest}); limits {MAX_UNPACKED} / {MAX_MEMBERS} / {MAX_MEMBER} per file")
             for info in z.infolist():
                 name = info.filename
                 if info.is_dir() or not name.lower().endswith(".csv") or ".." in Path(name).parts or name.startswith("/"):
