@@ -50,6 +50,23 @@ Streaming verification benchmark (format 2, 3 robots, about 2 KB per record):
 | 2.0 GB | 1,004,016 | 53.26 | 37.7 | 96.4 | not run |
 | 5.0 GB | 2,510,040 | 131.71 | 38.1 | 194.3 | not run |
 
+CI on this branch (commit d4bea24, GitHub Actions):
+
+| Job | Result |
+|---|---|
+| ubuntu-latest: build, Rust tests, clippy, pytest, sh demo, benchmark | passed |
+| windows-latest: build, Rust tests, clippy | passed |
+| windows-latest: pytest | 42 passed, 3 skipped (no Cursiv checkout, no `ioos_qc`, no ROS 2 on Windows) |
+| windows-latest: `scripts/demo.ps1` | passed after a fix: its first full Windows run showed PowerShell 5.1 aborting on stderr from native commands (d4bea24) |
+| Rust 1.82, cargo audit | passed |
+| ROS 2 Jazzy (ubuntu-24.04): live-graph test, capture core, MCAP, `scripts/ros2_quickstart.sh` | passed on 42946e9 |
+
+**Windows ingest is slow.** The CI benchmark (15,000 records) ingested 249 records/s on windows-latest, with batch-of-100
+latency p50 79 ms, p95 1.6 s, p99 2.7 s. On Linux it is about 15,000 records/s. Verification on Windows ran at
+11,084 records/s. The cost is the two fsyncs per batch (segment file and receipts), which are slow on that runner.
+The simulated robots' per-record fsync is slow in the same way, which is why the Windows Python suite takes about
+4.5 minutes. Not measured on a Windows 11 desktop. Grouping commits across batches is the obvious fix (roadmap).
+
 Raw data: `bench/results/2026-11-05-linux-scale-streaming.json`. Linux cloud container, 4 vCPUs. This is software
 on that computer, not robot hardware. The earlier format-1 verifier kept every record, about 3.3 KiB per record:
 486 MiB for 150,000 records.

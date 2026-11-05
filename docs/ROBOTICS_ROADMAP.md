@@ -22,7 +22,9 @@ flaky link. Success means:
 Alongside it:
 - CI on macOS, and `cargo deny` for licences.
 - Make the Cursiv-side integration changes (`docs/CURSIV_INTEGRATION.md`), with the owner's approval.
-- Streaming verification (memory independent of package size) and a read timeout or reverse proxy for off-host use.
+- Group commit in the station (one fsync for several concurrent batches): Windows ingest measured 249 records/s on CI.
+- Verification memory: replace the per-record receipt and id indexes (about 80 bytes per record) with an external sort, for packages beyond tens of millions of records.
+- A read timeout or reverse proxy for off-host use.
 - Live ROS 2 (Jazzy) test of `Ros2Forwarder` against `sensor_msgs` publishers in a container.
 - Segment files (rotate `records.jsonl` per N records, each sealed by a checkpoint), so very long missions do not need whole-log reads at start.
 

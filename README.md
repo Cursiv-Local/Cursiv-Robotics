@@ -134,6 +134,7 @@ cd python; py -m cursiv_sim.bench_scale --sizes-gb 0.1 1 2 --dir D:\bench   # mu
 ## Known limitations
 
 - Nothing has run on a physical robot, sensor or single-board computer.
+- Station ingest on Windows is slow: 249 records/s on the CI runner (two fsyncs per batch), against about 15,000 records/s on Linux.
 - Verification memory grows by about 80 bytes per record (indexes for receipts and duplicate checks), so
   a 50-million-record package would need about 4 GB. Science checks need the records in memory and report
   `not_assessed` above `--max-records`.
