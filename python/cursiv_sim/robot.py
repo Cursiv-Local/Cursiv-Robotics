@@ -119,14 +119,16 @@ class RobotAgent:
         obs = [body_json(e)["observation"] for e in inputs]
         values = [(o["measurement"]["value"], o["measurement"]["unit"]) for o in obs]
         value, unit = recompute(op, params or {}, values)
+        u = propagate(op, params or {}, [v[1] for v in values], [standard_u(o.get("measurement")) for o in obs])
         same_place = len({(o["location"] or {}).get("lat") for o in obs}) == 1 and obs[0]["location"]
         o = self.observation(observation_type or f"{obs[0]['observation_type']}_{op}",
                              sensor={"sensor_id": f"{self.robot_id}-compute", "sensor_type": "computation", "model": None, "calibration": None},
-                             value=value, unit=unit, uncertainty=None,
+                             value=value, unit=unit, uncertainty=u,
                              sensor_time=max(x["sensor_time"] for x in obs if x["sensor_time"]),
                              derived_from=[f"{x['robot_id']}/{x['observation_id']}" for x in obs],
                              processing=[{"step": "cursiv.derive", "software": SOFTWARE, "version": VERSION,
-                                          "parameters": {"op": op, "params": params or {}}}])
+                                          "parameters": {"op": op, "params": params or {},
+                                                         "uncertainty": "GUM first-order propagation, inputs assumed uncorrelated" if u is not None else None}}])
         if same_place:
             o["location"] = obs[0]["location"]
         o["provenance"]["source"] = "derived"
@@ -210,11 +212,65 @@ class RobotAgent:
             return {"sent": 0, "link": "lost", "pending": len(self.envelopes) - self.acked}
 
 
-CONVERSIONS = {("degC", "K"): lambda x: x + 273.15, ("K", "degC"): lambda x: x - 273.15,
-               ("degC", "degF"): lambda x: x * 9.0 / 5.0 + 32.0, ("degF", "degC"): lambda x: (x - 32.0) * 5.0 / 9.0,
-               ("hPa", "Pa"): lambda x: x * 100.0, ("Pa", "hPa"): lambda x: x / 100.0, ("hPa", "kPa"): lambda x: x / 10.0,
-               ("kPa", "hPa"): lambda x: x * 10.0, ("%", "1"): lambda x: x / 100.0, ("1", "%"): lambda x: x * 100.0,
-               ("m", "cm"): lambda x: x * 100.0, ("cm", "m"): lambda x: x / 100.0}
+# Mirror of crates/cursiv-evidence/src/units.rs: (from, to, a, b) with to = a * from + b.
+UNIT_TABLE = [("degC", "K", 1.0, 273.15), ("degC", "degF", 9.0 / 5.0, 32.0), ("hPa", "Pa", 100.0, 0.0), ("hPa", "kPa", 0.1, 0.0),
+              ("%", "1", 0.01, 0.0), ("m", "cm", 100.0, 0.0), ("m", "km", 0.001, 0.0), ("m", "ft", 1.0 / 0.3048, 0.0),
+              ("m/s", "km/h", 3.6, 0.0), ("mS/cm", "uS/cm", 1000.0, 0.0), ("mg/L", "ppm", 1.0, 0.0), ("dbar", "Pa", 10_000.0, 0.0)]
+
+
+def _direct(f, t):
+    for a_, b_, a, b in UNIT_TABLE:
+        if a_ == f and b_ == t:
+            return a, b
+        if b_ == f and a_ == t:
+            return 1.0 / a, -b / a
+    return None
+
+
+def affine(f: str, t: str):
+    if f == t:
+        return 1.0, 0.0
+    d = _direct(f, t)
+    if d:
+        return d
+    for a_, b_, _, _ in UNIT_TABLE:
+        for mid in (a_, b_):
+            if mid not in (f, t):
+                x, y = _direct(f, mid), _direct(mid, t)
+                if x and y:
+                    return y[0] * x[0], y[0] * x[1] + y[1]
+    return None
+
+
+def standard_u(m: dict | None):
+    """Mirror of science.rs::standard_u."""
+    u = (m or {}).get("uncertainty")
+    if not u:
+        return None
+    if u["kind"] == "standard":
+        return u["value"]
+    if u["kind"] == "expanded":
+        k = u.get("coverage_k") or 2.0
+        return u["value"] / (k if k > 0 else 2.0)
+    return u["value"] / math.sqrt(3.0)
+
+
+def propagate(op: str, params: dict, units: list[str], us: list) -> float | None:
+    """Mirror of reasoning.rs::propagate (GUM, uncorrelated inputs). None = not propagated."""
+    if op not in ("mean", "sum", "linear", "convert") or not us or any(u is None for u in us):
+        return None
+    rss = 0.0
+    for u in us:
+        rss += u * u
+    rss = math.sqrt(rss)
+    if op == "mean":
+        return rss / len(us)
+    if op == "sum":
+        return rss
+    if op == "linear":
+        return abs(params["a"]) * us[0]
+    a = affine(units[0], params["to"])
+    return abs(a[0]) * us[0] if a else None
 
 
 def recompute(op: str, params: dict, inputs: list[tuple[float, str]]) -> tuple[float, str]:
@@ -249,5 +305,8 @@ def recompute(op: str, params: dict, inputs: list[tuple[float, str]]) -> tuple[f
     if op == "linear":
         return params["a"] * xs[0] + params["b"], params.get("unit", unit)
     if op == "convert":
-        return CONVERSIONS[(unit, params["to"])](xs[0]), params["to"]
+        a = affine(unit, params["to"])
+        if a is None:
+            raise ValueError(f"no conversion from {unit} to {params['to']}")
+        return a[0] * xs[0] + a[1], params["to"]
     raise ValueError(f"unknown operation {op}")

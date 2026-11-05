@@ -695,3 +695,75 @@ fn trust_store_reload_takes_effect_immediately() {
     let e = r.record(r.obs(1, "air_temperature", 1.0, "2026-11-05T10:00:00Z"));
     assert!(matches!(l.store.ingest_batch(&[e]).unwrap()[0], Outcome::Rejected { ref code, .. } if code == "revoked_key"));
 }
+
+// ---- scientific checks: units, duplicates, gaps, timestamps, uncertainty propagation ---------
+
+#[test]
+fn units_duplicates_gaps_and_timestamps_are_checked() {
+    let mut l = lab("units");
+    let r = &mut l.robots[0];
+    let mut f = r.obs(1, "air_temperature", 140.0, "2026-11-05T10:00:00Z"); // 140 degF = 60 degC: in range after conversion
+    f.measurement.as_mut().unwrap().unit = "degF".into();
+    let mut hot = r.obs(2, "air_temperature", 200.0, "2026-11-05T10:01:00Z"); // 200 degF = 93 degC: out of range
+    hot.measurement.as_mut().unwrap().unit = "degF".into();
+    let mut odd = r.obs(3, "air_temperature", 1.0, "2026-11-05T10:02:00Z");
+    odd.measurement.as_mut().unwrap().unit = "furlongs".into();
+    let a = r.obs(4, "air_temperature", 15.0, "2026-11-05T10:03:00Z");
+    let mut replay = a.clone();
+    replay.observation_id = "rover-01-replayed".into(); // same reading, new id
+    let late = r.obs(6, "air_temperature", 15.0, "2026-11-05T11:30:00Z"); // long gap
+    let envs = [f, hot, odd, a, replay, late].map(|o| r.record(o));
+    let mut early_write = r.obs(7, "air_temperature", 15.0, "2026-11-05T12:00:00Z");
+    early_write.observation_id = "rover-01-written-early".into();
+    let rec = Record { schema: RECORD_SCHEMA.into(), robot_id: "rover-01".into(), seq: r.hashes.len() as u64 + 1, prev: r.hashes.last().unwrap().clone(),
+                       written_time: Some("2026-11-05T11:00:00Z".into()), observation: early_write };
+    let e = r.key.sign_json(RECORD_TYPE, &rec);
+    r.hashes.push(e.payload_hash());
+    let mut all = envs.to_vec();
+    all.push(e);
+    l.store.ingest_batch(&all).unwrap();
+    let rep = l.verify(&l.export("pkg"));
+    let mut prof = Profile::survey_default();
+    prof.types.get_mut("air_temperature").unwrap().expected_interval_s = Some(60.0);
+    let s = science::validate(&rep.records, &rep.receipts, &prof);
+    let n = |c: &str| s.counts.get(c).copied().unwrap_or(0);
+    assert_eq!(n("unit_converted"), 2, "{:?}", s.counts);
+    assert_eq!(n("out_of_range"), 1, "only the 200 degF reading is out of range in degC");
+    assert_eq!(n("unit_unrecognized"), 1);
+    assert_eq!(n("unit_mismatch"), 1, "no conversion exists from furlongs");
+    assert_eq!(n("duplicate_content"), 1);
+    assert!(n("sampling_gap") >= 1);
+    assert_eq!(n("sensor_time_after_write"), 1);
+}
+
+#[test]
+fn derived_uncertainty_is_propagated_and_checked() {
+    let mut l = lab("uncert");
+    let r = &mut l.robots[0];
+    let ins: Vec<Observation> = (1..=4).map(|k| r.obs(k, "air_temperature", 10.0 + k as f64, "2026-11-05T10:00:00Z")).collect(); // u = 0.2 each
+    let mut envs: Vec<Envelope> = ins.iter().map(|o| r.record(o.clone())).collect();
+    let refs: Vec<&Observation> = ins.iter().collect();
+    let with_u = |o: &mut Observation, u: Option<f64>| o.measurement.as_mut().unwrap().uncertainty = u.map(|v| Uncertainty { kind: "standard".into(), value: v, coverage_k: None });
+    let mut good = derived(r, 10, "mean", &refs, 12.5, true);
+    with_u(&mut good, Some(0.1));                       // sqrt(4 * 0.04) / 4 = 0.1
+    let mut overclaimed = derived(r, 11, "mean", &refs, 12.5, true);
+    with_u(&mut overclaimed, Some(0.01));               // claims 10x more precision than the inputs allow
+    let mut no_inputs_u: Vec<Observation> = ins.clone();
+    for (k, o) in no_inputs_u.iter_mut().enumerate() {
+        o.observation_id = format!("rover-01-nou-{k}");
+        o.measurement.as_mut().unwrap().uncertainty = None;
+    }
+    envs.extend(no_inputs_u.iter().map(|o| r.record(o.clone())));
+    let nrefs: Vec<&Observation> = no_inputs_u.iter().collect();
+    let mut invented = derived(r, 12, "mean", &nrefs, 12.5, true);
+    with_u(&mut invented, Some(0.1));                   // an uncertainty from inputs that have none
+    for o in [good, overclaimed, invented] {
+        envs.push(r.record(o));
+    }
+    l.store.ingest_batch(&envs).unwrap();
+    let (_, rs) = reason(&l, "pkg");
+    assert_eq!(rs.derivations["verified"], 3, "the values all match");
+    assert_eq!(rs.derivations["uncertainty_verified"], 1);
+    assert!(rs.flags.iter().any(|f| f.code == "uncertainty_mismatch"));
+    assert!(rs.flags.iter().any(|f| f.code == "uncertainty_unsupported"));
+}
