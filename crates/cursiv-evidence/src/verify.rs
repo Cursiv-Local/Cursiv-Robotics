@@ -64,6 +64,9 @@ pub struct Report {
     pub package_version: u32,
     /// True when every record and receipt is in `records` / `receipts` (science can run).
     pub records_complete: bool,
+    /// The outcome in plain sentences, most important first (for people, not programs; the
+    /// verdicts and findings are the authoritative result).
+    pub summary: Vec<String>,
     pub package: String,
     pub verified_time: String,
     pub trust_store: bool,
@@ -993,9 +996,11 @@ fn finish(dir: &Path, trust: Option<&TrustStore>, ctx: Ctx, robots: BTreeMap<Str
     } else {
         "incomplete"
     };
+    let summary = plain_summary(status, &verdicts, &ctx.findings, &robots, trust.is_some());
     Report {
         schema: "cursiv-verification-report-1".into(),
         status: status.into(),
+        summary,
         package_version,
         records_complete,
         package: dir.display().to_string(),
@@ -1010,6 +1015,77 @@ fn finish(dir: &Path, trust: Option<&TrustStore>, ctx: Ctx, robots: BTreeMap<Str
     }
 }
 
+/// What each finding code means, said plainly. `{n}` is the number of findings with that code.
+fn plain(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "record_signature" => "{n} record(s) were changed after they were signed: their signatures no longer match their contents.",
+        "file_changed" | "bag_fixity" => "{n} file(s) were changed after the package was signed.",
+        "file_missing" => "{n} file(s) listed in the package are missing.",
+        "file_unlisted" => "{n} file(s) were added to the package after it was signed.",
+        "chain" | "sequence" => "Records were removed, inserted or reordered ({n} break(s) in a robot's sequence of records).",
+        "checkpoint_mismatch" => "A robot's own signed checkpoint disagrees with its records: its history was rewritten or forked.",
+        "records_missing" => "Records are missing: a robot signed a checkpoint for more records than the package holds.",
+        "station_count_mismatch" => "The station's checkpoint lists a different number of records than the package holds.",
+        "segment_missing" => "{n} segment file(s) of a robot's log are missing.",
+        "segment_seal_mismatch" => "{n} log segment(s) do not match their station seal (changed, cut off, renamed or out of order).",
+        "segment_unsealed" => "{n} log segment(s) have no station seal.",
+        "truncated_file" => "{n} file(s) end in an incomplete line: the copy was cut off (an interrupted transfer?).",
+        "untrusted_signer" => "{n} record(s) were signed by a key your trust store does not accept (unknown, revoked or outside its dates).",
+        "untrusted_station" | "untrusted_seal" => "The station that signed this package is not trusted by your trust store.",
+        "signature_unverifiable" => "{n} signature(s) could not be checked: no key for the signer is known.",
+        "attachment_changed" => "{n} attachment(s) (images, recordings) were changed.",
+        "attachment_missing" => "{n} attachment(s) the records refer to are not in the package.",
+        "duplicate_observation" => "{n} observation id(s) appear twice.",
+        "correction_target_missing" => "{n} correction(s) refer to a record that is not in the package.",
+        "mixed_synthetic" => "Simulated and real records are mixed in one package.",
+        "invalid_observation" => "{n} record(s) do not meet the observation format.",
+        "unsupported_version" | "layout_version" | "version_mismatch" => "The package format is not one this verifier reads, or its labels disagree.",
+        "read_error" | "unreadable_dir" => "Part of the package could not be read (disk or permission problem).",
+        "symlink" | "hard_link" | "special_file" | "unsafe_path" => "The package contains links or paths outside itself, which packages may not.",
+        "no_manifest" | "not_a_bag" | "not_a_package" => "This is not a complete Cursiv Robotics evidence package.",
+        _ => return None,
+    })
+}
+
+fn plain_summary(status: &str, v: &Verdicts, findings: &[Finding], robots: &BTreeMap<String, RobotSummary>, trusted: bool) -> Vec<String> {
+    let records: u64 = robots.values().map(|r| r.records).sum();
+    let synthetic: u64 = robots.values().map(|r| r.synthetic_records).sum();
+    let mut out = vec![match status {
+        "verified" => format!("Verified: {records} record(s) from {} robot(s) are complete, unchanged since signing, and signed by keys you trust.", robots.len()),
+        "failed" => "NOT VERIFIED: do not use this package as evidence until the problems below are explained.".to_string(),
+        _ => "Not fully verified: nothing was found altered, but who signed it or whether it is complete could not be established.".to_string(),
+    }];
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for f in findings.iter().filter(|f| f.severity == "error") {
+        let c = counts.entry(f.code.as_str()).or_insert(0);
+        if *c == 0 {
+            order.push(f.code.as_str());
+        }
+        *c += 1;
+    }
+    let mut said = std::collections::HashSet::new();
+    for code in order {
+        let line = match plain(code) {
+            Some(t) => t.replace("{n}", &counts[code].to_string()),
+            None => findings.iter().find(|f| f.code == code).map(|f| f.message.clone()).unwrap_or_default(),
+        };
+        if said.insert(line.clone()) {
+            out.push(line);
+        }
+    }
+    if !trusted {
+        out.push("No trust store was given, so the signatures only show the records match the keys named inside the package, not who holds them.".into());
+    } else if v.completeness.starts_with("not_established") {
+        out.push("No trusted checkpoint covers every record, so completeness is not established.".into());
+    }
+    if synthetic > 0 {
+        out.push(format!("{synthetic} of {records} record(s) are SYNTHETIC (simulated), not real-world evidence."));
+    }
+    out.push("A valid signature shows who recorded a value and that it is unchanged; it does not show the value is scientifically correct.".into());
+    out
+}
+
 impl Report {
     pub fn all_pass(&self) -> bool {
         let v = &self.verdicts;
@@ -1019,6 +1095,10 @@ impl Report {
     pub fn text(&self) -> String {
         let v = &self.verdicts;
         let mut s = format!("Cursiv evidence verification: {}\n\n", self.package);
+        for line in &self.summary {
+            s += &format!("{line}\n");
+        }
+        s += "\n";
         for (k, val) in [("Structure", &v.structure), ("Integrity", &v.integrity), ("Authenticity", &v.authenticity),
                          ("Completeness", &v.completeness), ("Attachments", &v.attachments)] {
             s += &format!("  {k:<13} {val}\n");
