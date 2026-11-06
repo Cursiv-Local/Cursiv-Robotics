@@ -1,4 +1,4 @@
-# Cursiv integration contract (package version 1)
+# Cursiv integration contract (workspace contract 1; package formats 1 and 2)
 
 **Status:** the Robotics side is **implemented and tested**: the package format, the reference importer, the
 sample package, and ingestion of the research summary by Cursiv's own `core/documents.py`. The changes
@@ -23,11 +23,12 @@ A folder that is a valid BagIt 1.0 bag (RFC 8493):
 
 ```
 bagit.txt                         BagIt-Version: 1.0
-bag-info.txt                      includes "Cursiv-Package-Version: 1"
+bag-info.txt                      includes "Cursiv-Package-Version: 1" or "2"
 manifest-sha256.txt               SHA-256 of every data/ file (any BagIt tool can check fixity)
 tagmanifest-sha256.txt
 manifest.json                     DSSE envelope, payloadType application/vnd.cursiv.package-manifest.v1+json, signed by the station
-data/robots/<robot>/records.jsonl one DSSE envelope per record (payloadType application/vnd.cursiv.record.v1+json), signed by the robot
+data/robots/<robot>/records.jsonl one DSSE envelope per record (payloadType application/vnd.cursiv.record.v1+json), signed by the robot (format 1)
+data/robots/<robot>/segments/     the same records split into sealed segments (format 2, the default; see docs/FORMATS.md)
 data/robots/<robot>/checkpoints.jsonl
 data/receipts.jsonl               when the station received each record
 data/station-checkpoint.json      station-signed Merkle roots of every robot log and the receipts
@@ -37,7 +38,8 @@ data/README.txt
 ```
 
 Record and observation schemas: `docs/ROBOTICS_API.md`. A package is recognised by `bagit.txt` + `data/` + a `manifest.json` with the
-manifest payloadType. Importers must refuse an unknown `Cursiv-Package-Version` (tested).
+manifest payloadType. Importers must refuse an unknown `Cursiv-Package-Version` (tested). The reference importer reads
+formats 1 and 2 (`SUPPORTED_PACKAGE_VERSIONS`), and `cursiv_integration.layout` lists a robot's record files in either format.
 
 Compatibility rule: version 1 importers ignore unknown *files* in `data/` only if the signed manifest lists them, and refuse unknown
 *fields* in records (the schema is strict). A breaking change gets `Cursiv-Package-Version: 2`.

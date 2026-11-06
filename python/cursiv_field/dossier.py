@@ -17,6 +17,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cursiv_integration.layout import record_lines, robots
 from cursiv_sim.identity import body_json
 
 STATS = ("count", "mean", "min", "max", "stddev")
@@ -29,8 +30,8 @@ WRITER_RULES = """> **Instructions for anyone writing from this dossier (human o
 
 def records(package: Path) -> list[dict]:
     out = []
-    for f in sorted((package / "data/robots").glob("*/records.jsonl")):
-        out += [body_json(json.loads(line)) for line in f.read_text().splitlines() if line.strip()]
+    for r in robots(package):
+        out += [body_json(json.loads(line)) for line in record_lines(package, r)]
     return out
 
 

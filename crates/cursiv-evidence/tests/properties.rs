@@ -206,6 +206,17 @@ fn removed_or_swapped_files_are_reported_not_crashed_on() {
     assert_eq!(verify::verify_package(&empty, Some(trust)).verdicts.structure, "fail");
 }
 
+/// Inputs found by the property test (and their relatives), kept as fixed regression cases.
+#[test]
+fn non_canonical_paths_are_refused() {
+    for bad in ["0/.", "./a", "a/./b", "a//b", "a/", "/a", "..", "a/../b", "a\\b", "c:x", ""] {
+        assert!(!safe_rel(bad), "{bad:?} must be refused");
+    }
+    for good in ["a", "robots/r-1/segments/000001.jsonl", "blobs/sha256/ab", "a.b/c..d"] {
+        assert!(safe_rel(good), "{good:?} must be accepted");
+    }
+}
+
 /// Verification is a pure function of the bytes: running it twice gives the same verdicts.
 #[test]
 fn verification_is_deterministic() {
@@ -314,12 +325,12 @@ proptest! {
         prop_assert_ne!(&r, &merkle::root(&longer));
     }
 
-    /// Package-relative paths can never escape the package.
+    /// Package-relative paths can never escape the package, and each file has one canonical name.
     #[test]
     fn safe_paths_never_escape(s in "[a-zA-Z0-9./\\\\:_-]{0,40}") {
         if safe_rel(&s) {
             prop_assert!(!s.contains('\\') && !s.contains(':'));
-            prop_assert!(s.split('/').all(|c| c != ".." && c != "."), "{s}");
+            prop_assert!(s.split('/').all(|c| !c.is_empty() && c != ".." && c != "."), "{s}");
             prop_assert!(!Path::new(&s).is_absolute());
         }
     }

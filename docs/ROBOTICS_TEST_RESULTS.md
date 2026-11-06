@@ -30,6 +30,76 @@ desktop has not been tested directly; Windows Server CI is the closest check ava
 | Interoperability (`tests/test_interop.py`, optional packages installed; earlier run on this branch's base) | `python3 -m pytest tests -q` | 4 passed |
 | One-command demo | `python python/cursiv_demo` | DEMO PASSED: expected results identical, tampering detected (5 error codes), tampered copy refused at import, source unchanged |
 
+## Faster record transfer (2026-11-06)
+
+Raw data: `bench/results/2026-11-06-linux-transfer.json` (medians of 3 runs; before and after built from the same branch
+on the same 4-vCPU Linux container, which is about half as fast as the one used on 2026-11-05).
+
+| Path | Batch | Before (records/s) | After (records/s) |
+|---|---|---|---|
+| Station ingest (store API) | 100 | 7,341 | 14,613 |
+| Station ingest (store API) | 1,000 | 8,270 | 17,198 |
+| Station ingest (store API) | 1 / 10 | 1,261 / 4,553 | 1,221 / 4,616 (flush-bound; below the parallel threshold) |
+| Robot outbox to station over HTTP (loopback) | 100 | 4,733 | 9,435 |
+| Robot outbox to station over HTTP (loopback) | 500 | 5,252 | 11,210 |
+
+What changed:
+- **Parallel checks.** Signature verification was 84% of per-record station CPU (63 of 75 µs). The stateless checks
+  now run across threads for batches of 32 or more; the stateful checks stay in order. `parallel_batch_checks_match_one_at_a_time`
+  proves the outcomes are identical, with bad signatures, invalid observations, duplicates and gaps mixed in.
+- **Cheaper serial path.** Receipt hashes are computed without building a JSON tree, with byte-identical results
+  (`receipt_hash_is_unchanged`); leaf hashes and record lines come from the parallel stage.
+- **Single parse.** The bridge parses a batch straight into envelopes. Agents send stored lines unchanged.
+- **gzip.** Request bodies are accepted gzip-encoded, with the decompressed size capped (bombs get 413). Records are
+  9.0 times smaller at level 6. The client compresses automatically when the station is not on loopback.
+- **Tried and rejected:** HTTP keep-alive was 3.9 times slower with tiny_http, which does not set TCP_NODELAY and so
+  waits for delayed ACKs.
+
+On a slow link the wire size dominates. At 1 Mbit/s (125,000 bytes/s) that is about 71 records/s uncompressed and
+about 640 records/s with gzip. These are computed from the measured 1,754 bytes per record and the 9.0x ratio, not
+measured over a real radio, and ignore protocol overhead.
+
+## Interoperability and scalability upgrade (2026-11-05, branch claude/interop-scalability)
+
+| Suite | Result |
+|---|---|
+| Rust (`cargo test --release`): unit 8, faults 25, segments 7, API and converters 3, properties 11, doc test 1 | 55 passed, 0 failed; also on Rust 1.82 |
+| `tests/segments.rs` | missing, reordered, duplicated, tampered, truncated, unsealed and swapped-seal segments all fail verification in both memory modes; standalone segment checks; format-1 packages and the committed sample still verify; store migration keeps bytes; rotation survives restarts and interrupted seal writes; read failures and unsupported versions never give "verified" |
+| `tests/test_ros2.py` (live ROS 2 Jazzy, simulated publishers in another process) | passed: 5 topics; on every topic published = received + before_capture + lost (lost 0); recorded = received; 75 Temperature values equal their raw CDR; package verified; exported MCAP decodes with mcap-ros2-support without ROS |
+| `tests/test_ros2_core.py`, `tests/test_mcap.py`, `tests/test_api.py` | 6 + 2 + 5 passed (backpressure and accounting, offline-first sync, MCAP round trip incl. a JSON channel, PROV parsed by the `prov` library) |
+| `scripts/ros2_quickstart.sh` | passed: 1,066 records, every verdict pass |
+| All Python (`pytest tests`) | 44 passed, 1 skipped (`ioos_qc`) |
+
+Streaming verification benchmark (format 2, 3 robots, about 2 KB per record):
+
+| Package | Records | Verify (s) | MB/s | Peak RSS streaming (MiB) | Peak RSS with records kept (MiB) |
+|---|---|---|---|---|---|
+| 0.1 GB | 50,199 | 2.74 | 36.5 | 28.8 | 142.1 |
+| 1.0 GB | 502,008 | 27.23 | 36.8 | 50.1 | 1,484.3 |
+| 2.0 GB | 1,004,016 | 53.26 | 37.7 | 96.4 | not run |
+| 5.0 GB | 2,510,040 | 131.71 | 38.1 | 194.3 | not run |
+
+CI on this branch (commit d4bea24, GitHub Actions):
+
+| Job | Result |
+|---|---|
+| ubuntu-latest: build, Rust tests, clippy, pytest, sh demo, benchmark | passed |
+| windows-latest: build, Rust tests, clippy | passed |
+| windows-latest: pytest | 42 passed, 3 skipped (no Cursiv checkout, no `ioos_qc`, no ROS 2 on Windows) |
+| windows-latest: `scripts/demo.ps1` | passed after a fix: its first full Windows run showed PowerShell 5.1 aborting on stderr from native commands (d4bea24) |
+| Rust 1.82, cargo audit | passed |
+| ROS 2 Jazzy (ubuntu-24.04): live-graph test, capture core, MCAP, `scripts/ros2_quickstart.sh` | passed on 42946e9 |
+
+**Windows ingest is slow.** The CI benchmark (15,000 records) ingested 249 records/s on windows-latest, with batch-of-100
+latency p50 79 ms, p95 1.6 s, p99 2.7 s. On Linux it is about 15,000 records/s. Verification on Windows ran at
+11,084 records/s. The cost is the two fsyncs per batch (segment file and receipts), which are slow on that runner.
+The simulated robots' per-record fsync is slow in the same way, which is why the Windows Python suite takes about
+4.5 minutes. Not measured on a Windows 11 desktop. Grouping commits across batches is the obvious fix (roadmap).
+
+Raw data: `bench/results/2026-11-05-linux-scale-streaming.json`. Linux cloud container, 4 vCPUs. This is software
+on that computer, not robot hardware. The earlier format-1 verifier kept every record, about 3.3 KiB per record:
+486 MiB for 150,000 records.
+
 ## Windows (GitHub Actions, `windows-latest`, Python 3.12.10)
 
 | Check | Result |

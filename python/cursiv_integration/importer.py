@@ -31,7 +31,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-CONTRACT_VERSION = "1"
+try:
+    from . import layout
+except ImportError:  # vendored as a single module next to layout.py
+    import layout  # type: ignore
+
+CONTRACT_VERSION = "1"            # the workspace contract (docs/CURSIV_INTEGRATION.md)
+SUPPORTED_PACKAGE_VERSIONS = ("1", "2")   # package formats this importer reads (2 = segmented logs)
 MANIFEST_TYPE = "application/vnd.cursiv.package-manifest.v1+json"
 
 
@@ -107,8 +113,8 @@ def records(pkg: Path, unreadable: list | None = None) -> list[dict]:
     """Decoded record bodies. Unreadable lines (possible in quarantined packages) are skipped and
     reported through `unreadable`, never guessed."""
     out = []
-    for f in sorted((pkg / "data/robots").glob("*/records.jsonl")):
-        for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+    for robot in layout.robots(pkg):
+        for n, line in enumerate(layout.record_lines(pkg, robot), 1):
             if not line.strip():
                 continue
             try:
@@ -118,7 +124,7 @@ def records(pkg: Path, unreadable: list | None = None) -> list[dict]:
                 out.append(body)
             except (ValueError, KeyError, TypeError) as e:
                 if unreadable is not None:
-                    unreadable.append(f"{f.parent.name} line {n}: {type(e).__name__}")
+                    unreadable.append(f"{robot} record line {n}: {type(e).__name__}")
     return out
 
 
@@ -133,10 +139,10 @@ def import_package(src: Path, workspace: Path, trust: Path | None, *, quarantine
                     and v.get("authenticity", "").split(":")[0] in ("pass", "not_assessed"))
     bag_info = (src / "bag-info.txt").read_text(encoding="utf-8", errors="replace") if (src / "bag-info.txt").exists() else ""
     version = next((l.split(":", 1)[1].strip() for l in bag_info.splitlines() if l.startswith("Cursiv-Package-Version:")), None)
-    status = {"package": src.name, "source": str(src), "contract_version": version, "verify_exit": code,
+    status = {"package": src.name, "source": str(src), "contract_version": CONTRACT_VERSION, "package_version": version, "verify_exit": code,
               "verdicts": v, "imported": False, "imported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    if version not in (CONTRACT_VERSION, None):
-        status["reason"] = f"package contract version {version} is not supported by this importer (supports {CONTRACT_VERSION})"
+    if version not in (*SUPPORTED_PACKAGE_VERSIONS, None):
+        status["reason"] = f"package version {version} is not supported by this importer (supports {', '.join(SUPPORTED_PACKAGE_VERSIONS)})"
         return status
     if not integrity_ok and not quarantine:
         status["reason"] = ("integrity, structure, attachments or authenticity did not pass: not imported "

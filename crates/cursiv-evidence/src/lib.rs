@@ -5,6 +5,8 @@
 //! This crate answers the first two cryptographically, checks plausibility
 //! deterministically (`science`), and never claims the last two.
 
+pub mod api;
+pub mod convert;
 pub mod crypto;
 pub mod legacy;
 pub mod merkle;
@@ -12,6 +14,7 @@ pub mod model;
 pub mod package;
 pub mod reasoning;
 pub mod science;
+pub mod segment;
 pub mod store;
 pub mod trust;
 pub mod units;

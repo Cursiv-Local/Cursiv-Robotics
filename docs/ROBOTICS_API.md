@@ -68,7 +68,7 @@ uncertainty `kind` ∈ `standard, expanded (with coverage_k), bound`; unknown fi
 | GET | `/v1/health` | Liveness (no auth) | 200 |
 | GET | `/v1/status` | Robots, counts, heads, missions, recovery notes | 200 |
 | GET | `/v1/robots/{id}/head` | `{count, head}`: where to resume | 200, 400 |
-| POST | `/v1/observations` | One envelope, or `{"records":[…]}` | 201 accepted, 200 duplicate, 207 batch, 400, 403, 409, 413, 422, 503 |
+| POST | `/v1/observations` | One envelope, or `{"records":[…]}`; `Content-Encoding: gzip` accepted (decompressed size capped at 8 MiB) | 201 accepted, 200 duplicate, 207 batch, 400, 403, 409, 413, 415 (unsupported encoding), 422, 503 |
 | POST | `/v1/checkpoints` | Robot-signed checkpoint | 201, 409 equivocation |
 | PUT | `/v1/attachments/{sha256}` | Raw bytes; must match hash and length | 201, 200 present, 400, 411, 413 |
 | GET | `/v1/attachments/{sha256}` | Presence | 200, 404 |

@@ -12,3 +12,4 @@ cursiv-evidence = { path = "../cursiv-evidence" }
 serde.workspace = true
 serde_json.workspace = true
 tiny_http.workspace = true
+flate2.workspace = true

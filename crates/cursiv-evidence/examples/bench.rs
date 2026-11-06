@@ -36,7 +36,12 @@ fn main() {
     let per: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let robots: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
     let out = args.get(3).cloned();
-    let dir = std::env::temp_dir().join(format!("cursiv-bench-{}", std::process::id()));
+    // CURSIV_BENCH_DIR: where to build the store and package (needs about 2x the package size free)
+    let base = std::env::var_os("CURSIV_BENCH_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("cursiv-bench-{}", std::process::id()));
+    let science_max: u64 = std::env::var("CURSIV_BENCH_SCIENCE_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000);
+    let batch: u64 = std::env::var("CURSIV_BENCH_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let store_seg: u64 = std::env::var("CURSIV_BENCH_SEGMENT").ok().and_then(|v| v.parse().ok()).unwrap_or(cursiv_evidence::segment::DEFAULT_SEGMENT_RECORDS);
     let _ = std::fs::remove_dir_all(&dir);
 
     let keys: Vec<Identity> = (0..robots).map(|i| Identity::from_seed([i as u8 + 1; 32])).collect();
@@ -47,53 +52,59 @@ fn main() {
         trust.robots.insert(format!("bench-{i:02}"), vec![tk(k)]);
     }
     trust.stations.insert("bench-station".into(), vec![tk(&Identity::from_seed(station))]);
+    let trust_copy = trust.clone();
     let mut store = Store::open(&dir.join("store"), "bench-station", Identity::from_seed(station), trust.clone()).unwrap();
+    store.set_segment_limits(cursiv_evidence::store::SegmentLimits { records: store_seg, bytes: cursiv_evidence::segment::DEFAULT_SEGMENT_BYTES });
 
-    // 1. robot side: build and sign records
-    let t = Instant::now();
-    let mut all: Vec<(String, Vec<cursiv_evidence::crypto::Envelope>, Vec<String>)> = vec![];
+    // 1-2. robots sign records and the station ingests them in batches of 100 (the agent's
+    // default), with a robot checkpoint every 10,000 records. Generated in batches, so the
+    // benchmark itself never holds the dataset in memory.
+    let total = per * robots;
+    let (mut sign_s, mut ingest_s) = (0.0f64, 0.0f64);
+    let mut batch_lat = vec![];
     for (i, key) in keys.iter().enumerate() {
         let rid = format!("bench-{i:02}");
-        let (mut envs, mut hashes) = (vec![], vec![]);
-        for n in 1..=per {
-            let obs = Observation {
-                schema: OBSERVATION_SCHEMA.into(), observation_id: format!("{rid}-obs-{n:07}"), robot_id: rid.clone(), mission_id: "bench".into(),
-                observation_type: "air_temperature".into(), synthetic: true,
-                sensor: Sensor { sensor_id: format!("{rid}-t1"), sensor_type: "thermistor".into(), model: None,
-                    calibration: Some(Calibration { calibrated_utc: Some("2026-10-01T00:00:00Z".into()), valid_until_utc: Some("2027-10-01T00:00:00Z".into()), reference: None, certificate_sha256: None }) },
-                sensor_time: Some(format_utc(1_793_000_000.0 + n as f64)), time_source: TimeSource::Simulated, clock: None,
-                location: Some(Location { lat: 45.0, lon: -122.0, alt_m: None, crs: "EPSG:4326".into(), horizontal_accuracy_m: Some(3.0), source: "simulated".into() }),
-                measurement: Some(Measurement { value: Some(15.0 + 0.5 * (n as f64 / 600.0).sin()), text: None, unit: "degC".into(),
-                                                uncertainty: Some(Uncertainty { kind: "standard".into(), value: 0.2, coverage_k: None }) }),
-                attachments: vec![], provenance: Provenance { source: "simulated".into(), software: "bench".into(), software_version: "1".into(), derived_from: vec![] },
-                processing: vec![], quality: None, correction: None, claim: None,
-            };
-            let rec = Record { schema: RECORD_SCHEMA.into(), robot_id: rid.clone(), seq: n, prev: hashes.last().cloned().unwrap_or_else(|| GENESIS.into()), written_time: None, observation: obs };
-            let env = key.sign_json(RECORD_TYPE, &rec);
-            hashes.push(env.payload_hash());
-            envs.push(env);
-        }
-        all.push((rid, envs, hashes));
-    }
-    let sign_s = t.elapsed().as_secs_f64();
-    let total = per * robots;
-
-    // 2. station side: ingest in batches of 100 (the robot agent's default), then checkpoints
-    let t = Instant::now();
-    let mut batch_lat = vec![];
-    for (i, (rid, envs, hashes)) in all.iter().enumerate() {
-        for chunk in envs.chunks(100) {
+        let mut head = GENESIS.to_string();
+        let mut frontier = merkle::Frontier::new();
+        let mut n = 0u64;
+        while n < per {
+            let t = Instant::now();
+            let mut envs = Vec::with_capacity(batch as usize);
+            for _ in 0..batch.min(per - n) {
+                n += 1;
+                let obs = Observation {
+                    schema: OBSERVATION_SCHEMA.into(), observation_id: format!("{rid}-obs-{n:08}"), robot_id: rid.clone(), mission_id: "bench".into(),
+                    observation_type: "air_temperature".into(), synthetic: true,
+                    sensor: Sensor { sensor_id: format!("{rid}-t1"), sensor_type: "thermistor".into(), model: None,
+                        calibration: Some(Calibration { calibrated_utc: Some("2026-10-01T00:00:00Z".into()), valid_until_utc: Some("2027-10-01T00:00:00Z".into()), reference: None, certificate_sha256: None }) },
+                    sensor_time: Some(format_utc(1_793_000_000.0 + n as f64)), time_source: TimeSource::Simulated, clock: None,
+                    location: Some(Location { lat: 45.0, lon: -122.0, alt_m: None, crs: "EPSG:4326".into(), horizontal_accuracy_m: Some(3.0), source: "simulated".into() }),
+                    measurement: Some(Measurement { value: Some(15.0 + 0.5 * (n as f64 / 600.0).sin()), text: None, unit: "degC".into(),
+                                                    uncertainty: Some(Uncertainty { kind: "standard".into(), value: 0.2, coverage_k: None }) }),
+                    attachments: vec![], provenance: Provenance { source: "simulated".into(), software: "bench".into(), software_version: "1".into(), derived_from: vec![] },
+                    processing: vec![], quality: None, correction: None, claim: None,
+                };
+                let rec = Record { schema: RECORD_SCHEMA.into(), robot_id: rid.clone(), seq: n, prev: head.clone(), written_time: None, observation: obs };
+                let env = key.sign_json(RECORD_TYPE, &rec);
+                head = env.payload_hash();
+                frontier.push(&head);
+                envs.push(env);
+            }
+            sign_s += t.elapsed().as_secs_f64();
             let b = Instant::now();
-            for o in store.ingest_batch(chunk).unwrap() {
+            for o in store.ingest_batch(&envs).unwrap() {
                 assert!(matches!(o, Outcome::Accepted { .. }), "{o:?}");
             }
-            batch_lat.push(b.elapsed().as_secs_f64() * 1000.0);
+            if n % 10_000 == 0 || n == per {
+                let cp = key.sign_json(CHECKPOINT_TYPE, &Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: rid.clone(), count: n,
+                    head: head.clone(), merkle_root: frontier.root(), signed_time: None });
+                assert!(matches!(store.ingest_checkpoint(&cp), Outcome::Accepted { .. }));
+            }
+            let dt = b.elapsed().as_secs_f64();
+            ingest_s += dt;
+            batch_lat.push(dt * 1000.0);
         }
-        let cp = keys[i].sign_json(CHECKPOINT_TYPE, &Checkpoint { schema: CHECKPOINT_SCHEMA.into(), robot_id: rid.clone(), count: hashes.len() as u64,
-            head: hashes.last().unwrap().clone(), merkle_root: merkle::root(hashes), signed_time: None });
-        assert!(matches!(store.ingest_checkpoint(&cp), Outcome::Accepted { .. }));
     }
-    let ingest_s = t.elapsed().as_secs_f64();
     batch_lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f64| batch_lat[((batch_lat.len() - 1) as f64 * p).round() as usize];
 
@@ -103,12 +114,19 @@ fn main() {
     store.export(&pkg).unwrap();
     let export_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let report = verify::verify_package(&pkg, Some(&trust));
+    let lean = verify::verify_package_with(&pkg, Some(&trust), &verify::VerifyOptions::streaming());
     let verify_s = t.elapsed().as_secs_f64();
-    assert!(report.all_pass(), "{}", report.text());
-    let t = Instant::now();
-    let sci = science::validate(&report.records, &report.receipts, &Profile::survey_default());
-    let science_s = t.elapsed().as_secs_f64();
+    assert!(lean.all_pass(), "{}", lean.text());
+    drop(lean);
+    // science needs the records in memory; skipped above a size where that is impractical
+    let (science_s, sci_counts) = if total <= science_max {
+        let report = verify::verify_package(&pkg, Some(&trust));
+        let t = Instant::now();
+        let sci = science::validate(&report.records, &report.receipts, &Profile::survey_default());
+        (Some(t.elapsed().as_secs_f64()), Some(sci.counts))
+    } else {
+        (None, None)
+    };
     drop(store);
     let t = Instant::now();
     let reopened = Store::open(&dir.join("store"), "bench-station", Identity::from_seed(station), trust).unwrap();
@@ -118,13 +136,13 @@ fn main() {
     let result = serde_json::json!({
         "schema": "cursiv-bench-rust-1",
         "measured_on": format!("{} {} (software benchmark on this computer, not robot hardware)", std::env::consts::OS, std::env::consts::ARCH),
-        "records": total, "robots": robots,
+        "records": total, "robots": robots, "batch": batch,
         "package_bytes": tree_bytes(&pkg),
         "sign_records_per_s": (total as f64 / sign_s).round(),
         "ingest_records_per_s": (total as f64 / ingest_s).round(),
-        "ingest_batch100_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "max": pct(1.0)},
+        "ingest_batch_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "max": pct(1.0)},
         "export_s": export_s, "verify_s": verify_s, "verify_records_per_s": (total as f64 / verify_s).round(),
-        "science_s": science_s, "science_flags": sci.counts, "reopen_s": reopen_s,
+        "science_s": science_s, "science_flags": sci_counts, "package_version": 2, "segment_records": store_seg, "reopen_s": reopen_s,
         "peak_rss_mib": peak_rss_kib().map(|k| (k as f64 / 1024.0 * 10.0).round() / 10.0),
     });
     let text = serde_json::to_string_pretty(&result).unwrap();
@@ -133,6 +151,7 @@ fn main() {
         std::fs::write(o, text + "\n").unwrap();
     }
     if std::env::var_os("CURSIV_BENCH_KEEP").is_some() {
+        std::fs::write(dir.join("trust.json"), serde_json::to_string_pretty(&trust_copy).unwrap()).unwrap();
         eprintln!("package kept at {}", pkg.display());
     } else {
         let _ = std::fs::remove_dir_all(&dir);

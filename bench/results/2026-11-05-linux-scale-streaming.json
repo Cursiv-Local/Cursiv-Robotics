@@ -1,0 +1,89 @@
+{
+  "schema": "cursiv-bench-scale-1",
+  "measured_on": "Linux x86_64, 4 logical CPUs (software benchmark, not robot hardware)",
+  "python": "3.13.18",
+  "results": [
+    {
+      "target_gb": 0.1,
+      "records": 50199,
+      "package_bytes": 100085968,
+      "segment_records": 10000,
+      "generate_s": 8.4,
+      "ingest_records_per_s": 14139.0,
+      "export_s": 0.18,
+      "reopen_s": 0.55,
+      "verify_streaming": {
+        "exit": 0,
+        "status": "verified",
+        "wall_s": 2.74,
+        "records_per_s": 18319,
+        "mb_per_s": 36.5,
+        "peak_rss_mib": 28.8
+      },
+      "verify_collecting_with_science": {
+        "exit": 0,
+        "wall_s": 3.12,
+        "peak_rss_mib": 142.1
+      }
+    },
+    {
+      "target_gb": 1.0,
+      "records": 502008,
+      "package_bytes": 1002863888,
+      "segment_records": 10000,
+      "generate_s": 77.8,
+      "ingest_records_per_s": 15117.0,
+      "export_s": 1.66,
+      "reopen_s": 4.77,
+      "verify_streaming": {
+        "exit": 0,
+        "status": "verified",
+        "wall_s": 27.23,
+        "records_per_s": 18434,
+        "mb_per_s": 36.8,
+        "peak_rss_mib": 50.1
+      },
+      "verify_collecting_with_science": {
+        "exit": 0,
+        "wall_s": 29.41,
+        "peak_rss_mib": 1484.3
+      }
+    },
+    {
+      "target_gb": 2.0,
+      "records": 1004016,
+      "package_bytes": 2006464708,
+      "segment_records": 10000,
+      "generate_s": 155.4,
+      "ingest_records_per_s": 15062.0,
+      "export_s": 3.41,
+      "reopen_s": 9.6,
+      "verify_streaming": {
+        "exit": 0,
+        "status": "verified",
+        "wall_s": 53.26,
+        "records_per_s": 18850,
+        "mb_per_s": 37.7,
+        "peak_rss_mib": 96.4
+      }
+    },
+    {
+      "target_gb": 5.0,
+      "records": 2510040,
+      "package_bytes": 5018749042,
+      "segment_records": 10000,
+      "generate_s": 389.9,
+      "ingest_records_per_s": 15152.0,
+      "export_s": 10.46,
+      "reopen_s": 23.43,
+      "verify_streaming": {
+        "exit": 0,
+        "status": "verified",
+        "wall_s": 131.71,
+        "records_per_s": 19058,
+        "mb_per_s": 38.1,
+        "peak_rss_mib": 194.3
+      }
+    }
+  ]
+}

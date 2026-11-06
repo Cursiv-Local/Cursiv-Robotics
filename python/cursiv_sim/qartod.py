@@ -18,6 +18,8 @@ import subprocess
 from collections import defaultdict
 from pathlib import Path
 
+from cursiv_integration.layout import record_lines, robots
+
 from .identity import body_json
 from .lab import binary
 
@@ -51,8 +53,8 @@ def verified_records(pkg: Path, trust: Path) -> tuple[list[dict], dict]:
     if v["integrity"] != "pass" or v["authenticity"] != "pass":
         return [], report
     records = []
-    for f in sorted((Path(pkg) / "data/robots").glob("*/records.jsonl")):
-        records += [body_json(json.loads(line)) for line in f.read_text().splitlines() if line.strip()]
+    for r in robots(Path(pkg)):
+        records += [body_json(json.loads(line)) for line in record_lines(Path(pkg), r)]
     corrected = {(r["robot_id"], r["observation"]["correction"]["corrects_observation_id"]) for r in records if r["observation"]["correction"]}
     return [r for r in records if (r["robot_id"], r["observation"]["observation_id"]) not in corrected], report
 

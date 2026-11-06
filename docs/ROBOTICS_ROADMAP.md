@@ -7,6 +7,8 @@ Documented, not implemented. The order reflects what real deployments need first
 - Real data without hardware: phone recordings (phyphox) to signed evidence and a research dossier for Cursiv (`docs/PHONE_GUIDE.md`). Format fixtures follow phyphox's exporter; a real export from the owner's phone is the next validation.
 - Pre-hardware hardening (2026-11-05, `docs/AUDIT_2026-11-05.md`): storage quota, fail-stop, atomic export, live trust reload, units and GUM uncertainty propagation, duplicate/gap/timestamp checks, deterministic virtual missions (stationary, ground, underwater, aerial, multi-robot), Cursiv package contract v1 with a reference importer, property and mutation fuzz tests, Rust benchmark, CI on Linux and Windows with `cargo audit` and Rust 1.82.
 
+- Interoperability and scalability (2026-11-05): segmented logs with seals and streaming verification (5 GB at 194 MiB), store migration, ROS 2 capture node (Jazzy, simulated publishers), MCAP import/export, PROV-JSON and SensorThings converters, stable Rust and Python APIs v1.
+
 ## Next milestone (recommended)
 
 **One real sensor, end to end, on Windows and a Raspberry Pi.** For example a USB or I²C temperature or
@@ -20,7 +22,10 @@ flaky link. Success means:
 Alongside it:
 - CI on macOS, and `cargo deny` for licences.
 - Make the Cursiv-side integration changes (`docs/CURSIV_INTEGRATION.md`), with the owner's approval.
-- Streaming verification (memory independent of package size) and a read timeout or reverse proxy for off-host use.
+- Windows ingest: measured 249 records/s on CI with one batch at a time. Concurrent requests are already coalesced into one write and flush; fewer flushes per batch (e.g. receipts batched across writes) would help sequential senders.
+- Faster transfer, done 2026-11-06 (`bench/results/2026-11-06-linux-transfer.json`): parallel record checks (station ingest 2x), records sent as stored, gzip for non-loopback stations. Further: Ed25519 batch verification (about 2x on the signature share), a Rust robot agent.
+- Verification memory: replace the per-record receipt and id indexes (about 80 bytes per record) with an external sort, for packages beyond tens of millions of records.
+- A read timeout or reverse proxy for off-host use.
 - Live ROS 2 (Jazzy) test of `Ros2Forwarder` against `sensor_msgs` publishers in a container.
 - Segment files (rotate `records.jsonl` per N records, each sealed by a checkpoint), so very long missions do not need whole-log reads at start.
 

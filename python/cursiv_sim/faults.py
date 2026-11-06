@@ -18,6 +18,8 @@ import threading
 import time
 from pathlib import Path
 
+from cursiv_integration.layout import record_files
+
 from .identity import MANIFEST_TYPE, RECORD_TYPE, Identity, body_json, payload_hash, sha256_hex, with_body
 from .lab import Lab
 from .robot import RobotAgent
@@ -56,7 +58,7 @@ def v(rep: dict, key: str) -> str:
 
 
 def edit_record(pkg: Path, robot: str, index: int, mutate) -> None:
-    f = pkg / f"data/robots/{robot}/records.jsonl"
+    f = record_files(pkg, robot)[0]        # records 1..10,000 are in the first file
     lines = f.read_text().splitlines()
     env = json.loads(lines[index])
     rec = body_json(env)
@@ -121,7 +123,7 @@ def main(argv=None) -> int:
     @scenario(3, "Missing observation", "integrity")
     def s3():
         p = lab.copy_package(base, "s3")
-        f = p / "data/robots/rover-02/records.jsonl"
+        f = record_files(p, "rover-02")[-1]
         lines = f.read_text().splitlines()
         f.write_text("\n".join(lines[:-1]) + "\n")          # drop the LAST record: chain still links
         code, rep = lab.verify(p)
@@ -318,7 +320,7 @@ def main(argv=None) -> int:
     def s11():
         p = lab.copy_package(base, "s11")
         attacker = Identity.generate()
-        f = p / "data/robots/rover-01/records.jsonl"
+        f = record_files(p, "rover-01")[0]   # the package holds one segment: the attacker rewrites it all
         prev, out_lines = "genesis", []
         for line in f.read_text().splitlines():
             rec = body_json(json.loads(line))

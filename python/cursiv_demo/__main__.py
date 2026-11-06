@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve()
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO / "python"))
 
-from cursiv_integration import importer  # noqa: E402
+from cursiv_integration import importer, layout  # noqa: E402
 from cursiv_sim import missions  # noqa: E402
 from cursiv_sim.lab import binary  # noqa: E402
 
@@ -53,7 +53,8 @@ def tamper(pkg: Path, dest: Path) -> Path:
     """Copy the package and change one measured value inside a signed record."""
     bad = dest / pkg.name
     shutil.copytree(pkg, bad)
-    f = sorted((bad / "data/robots").glob("buoy-*/records.jsonl"))[0]
+    buoy = next(r for r in layout.robots(bad) if r.startswith("buoy-"))
+    f = layout.record_files(bad, buoy)[0]
     lines = f.read_text().splitlines()
     env = json.loads(lines[5])
     body = json.loads(base64.b64decode(env["payload"]))

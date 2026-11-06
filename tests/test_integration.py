@@ -63,7 +63,8 @@ def test_tampered_or_untrusted_packages_are_not_imported(mission, tmp_path):
     pkg, trust = mission
     bad = tmp_path / "bad" / pkg.name
     shutil.copytree(pkg, bad)
-    f = next((bad / "data/robots").glob("buoy-*/records.jsonl"))
+    from cursiv_integration.layout import record_files, robots
+    f = record_files(bad, next(r for r in robots(bad) if r.startswith("buoy-")))[0]
     f.write_text(f.read_text().replace("A", "B", 1))
     s = importer.import_package(bad, tmp_path / "ws", trust)
     assert not s["imported"] and "did not pass" in s["reason"]
@@ -87,7 +88,8 @@ def test_unsupported_contract_version_is_refused(mission, tmp_path):
     future = tmp_path / "future" / pkg.name
     shutil.copytree(pkg, future)
     info = future / "bag-info.txt"
-    info.write_text(info.read_text().replace("Cursiv-Package-Version: 1", "Cursiv-Package-Version: 9"))
+    import re
+    info.write_text(re.sub(r"Cursiv-Package-Version: \d+", "Cursiv-Package-Version: 9", info.read_text()))
     s = importer.import_package(future, tmp_path / "ws", trust)
     assert not s["imported"] and "not supported" in s["reason"]
 
