@@ -1,9 +1,12 @@
 # Cursiv integration contract (workspace contract 1; package formats 1 and 2)
 
 **Status:** the Robotics side is **implemented and tested**: the package format, the reference importer, the
-sample package, and ingestion of the research summary by Cursiv's own `core/documents.py`. The changes
-inside the Cursiv application are **not made**. They are specified below and await the owner's approval
-to change the Cursiv repository.
+sample package, and ingestion of the research summary by Cursiv's own `core/documents.py`. The Cursiv side is
+**implemented on Cursiv branch `claude/robot-evidence`** (not yet merged or released): `core/robot_evidence.py`
+finds, verifies with the bundled `cursiv-verify`, and imports packages following the rules below, adds each
+research summary to the document library, and checks that answers cite only `robot/observation_id`s from
+imported packages. See Cursiv's `docs/ROBOT-EVIDENCE.md`. It has been tested with the fixture packages only,
+not with a package from a real drive or robot.
 
 ## Workflow
 
@@ -15,7 +18,7 @@ to change the Cursiv repository.
 | 4 | Discover packages | `cursiv_integration.importer.discover` (no symlinks followed, depth ≤ 4) | implemented (reference) |
 | 5 | Verify integrity and provenance | `cursiv-verify package --json --science [--trust]` | implemented |
 | 6 | Organise into a research workspace | `cursiv_integration.importer.import_package` | implemented (reference) |
-| 7 | Generate a scientific report | `views/<package>/research-summary.md` → Cursiv `add document` and report writer | summary implemented; Cursiv report flow **not yet wired** |
+| 7 | Generate a scientific report | `views/<package>/research-summary.md` → Cursiv `add document` and report writer | implemented: summary goes into Cursiv's documents (`robot evidence import`), answers cite records and are checked (Cursiv branch, unreleased) |
 
 ## The package (contract version 1)
 
