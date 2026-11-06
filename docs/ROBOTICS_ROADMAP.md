@@ -22,7 +22,8 @@ flaky link. Success means:
 Alongside it:
 - CI on macOS, and `cargo deny` for licences.
 - Make the Cursiv-side integration changes (`docs/CURSIV_INTEGRATION.md`), with the owner's approval.
-- Group commit in the station (one fsync for several concurrent batches): Windows ingest measured 249 records/s on CI.
+- Windows ingest: measured 249 records/s on CI with one batch at a time. Concurrent requests are already coalesced into one write and flush; fewer flushes per batch (e.g. receipts batched across writes) would help sequential senders.
+- Faster transfer, done 2026-11-06 (`bench/results/2026-11-06-linux-transfer.json`): parallel record checks (station ingest 2x), records sent as stored, gzip for non-loopback stations. Further: Ed25519 batch verification (about 2x on the signature share), a Rust robot agent.
 - Verification memory: replace the per-record receipt and id indexes (about 80 bytes per record) with an external sort, for packages beyond tens of millions of records.
 - A read timeout or reverse proxy for off-host use.
 - Live ROS 2 (Jazzy) test of `Ros2Forwarder` against `sensor_msgs` publishers in a container.

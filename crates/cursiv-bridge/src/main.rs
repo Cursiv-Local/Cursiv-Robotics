@@ -59,14 +59,32 @@ fn header<'a>(req: &'a Request, name: &'static str) -> Option<&'a str> {
     req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str())
 }
 
+/// Read a request body of at most `limit` bytes. `Content-Encoding: gzip` is accepted (records
+/// compress about 9x, which matters on slow field links): the decompressed size is capped at
+/// `limit` too, so a small hostile body cannot expand without bound.
 fn read_body(req: &mut Request, limit: usize) -> Result<Vec<u8>, Response<std::io::Cursor<Vec<u8>>>> {
     if req.body_length().is_some_and(|n| n > limit) {
         return Err(err(413, "too_large", &format!("body exceeds {limit} bytes")));
     }
+    let encoding = header(req, "Content-Encoding").map(|e| e.trim().to_ascii_lowercase());
     let mut buf = Vec::new();
-    req.as_reader().take(limit as u64 + 1).read_to_end(&mut buf).map_err(|e| err(400, "read_failed", &e.to_string()))?;
+    match encoding.as_deref() {
+        None | Some("identity") => {
+            req.as_reader().take(limit as u64 + 1).read_to_end(&mut buf).map_err(|e| err(400, "read_failed", &e.to_string()))?;
+        }
+        Some("gzip") => {
+            let mut raw = Vec::new();
+            req.as_reader().take(limit as u64 + 1).read_to_end(&mut raw).map_err(|e| err(400, "read_failed", &e.to_string()))?;
+            if raw.len() > limit {
+                return Err(err(413, "too_large", &format!("body exceeds {limit} bytes")));
+            }
+            flate2::read::GzDecoder::new(raw.as_slice()).take(limit as u64 + 1).read_to_end(&mut buf)
+                .map_err(|e| err(400, "bad_gzip", &format!("body is not valid gzip: {e}")))?;
+        }
+        Some(other) => return Err(err(415, "unsupported_encoding", &format!("Content-Encoding {other:?} is not supported (use gzip or none)"))),
+    }
     if buf.len() > limit {
-        return Err(err(413, "too_large", &format!("body exceeds {limit} bytes")));
+        return Err(err(413, "too_large", &format!("body exceeds {limit} bytes (after decompression)")));
     }
     Ok(buf)
 }
@@ -189,11 +207,23 @@ impl App {
             }
             (Method::Post, ["v1", "observations"]) => {
                 let body = match read_body(req, MAX_JSON_BODY) { Ok(b) => b, Err(r) => return r };
-                let v: serde_json::Value = match serde_json::from_slice(&body) { Ok(v) => v, Err(e) => return err(400, "malformed_json", &e.to_string()) };
-                let envs: Result<Vec<Envelope>, _> = if v.get("records").is_some() {
-                    serde_json::from_value(v["records"].clone())
-                } else {
-                    serde_json::from_value(v).map(|e| vec![e])
+                // parsed straight into envelopes (no intermediate JSON tree): {"records": [...]} or one envelope
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Batch {
+                    records: Vec<Envelope>,
+                }
+                let envs: Result<Vec<Envelope>, String> = match serde_json::from_slice::<Batch>(&body) {
+                    Ok(b) => Ok(b.records),
+                    Err(batch_err) => match serde_json::from_slice::<Envelope>(&body) {
+                        Ok(e) => Ok(vec![e]),
+                        Err(_) => {
+                            if let Err(e) = serde_json::from_slice::<serde::de::IgnoredAny>(&body) {
+                                return err(400, "malformed_json", &e.to_string()); // not JSON at all
+                            }
+                            Err(batch_err.to_string())
+                        }
+                    },
                 };
                 match envs {
                     Err(e) => err(400, "malformed_envelope", &e.to_string()),

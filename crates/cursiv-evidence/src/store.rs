@@ -68,11 +68,26 @@ pub struct Receipt {
     pub hash: String,
 }
 
+/// The receipt without its hash, fields in alphabetical order: serde_json serialises this to
+/// exactly the bytes of the sorted-key object the hash has always been defined over (tested in
+/// `receipt_hash_is_unchanged`), without building a JSON tree per receipt.
+#[derive(Serialize)]
+struct ReceiptBody<'a> {
+    prev: &'a str,
+    received_time: &'a str,
+    record_hash: &'a str,
+    robot_id: &'a str,
+    robot_seq: u64,
+    schema: &'a str,
+    seq: u64,
+    station_id: &'a str,
+}
+
 impl Receipt {
     pub fn compute_hash(&self) -> String {
-        let mut body = serde_json::to_value(self).expect("receipt");
-        body.as_object_mut().unwrap().remove("hash");
-        sha256_hex(body.to_string().as_bytes())
+        let b = ReceiptBody { prev: &self.prev, received_time: &self.received_time, record_hash: &self.record_hash, robot_id: &self.robot_id,
+                              robot_seq: self.robot_seq, schema: &self.schema, seq: self.seq, station_id: &self.station_id };
+        sha256_hex(serde_json::to_string(&b).expect("receipt").as_bytes())
     }
 }
 
@@ -175,11 +190,19 @@ impl RobotState {
         merkle::root(&hs)
     }
     fn accept(&mut self, hash: &str, obs_id: &str, mission: &str, keyid: &str) {
+        self.accept_leaf(hash, merkle::leaf_hash(hash), obs_id, mission, keyid)
+    }
+    fn accept_leaf(&mut self, hash: &str, leaf: [u8; 32], obs_id: &str, mission: &str, keyid: &str) {
         self.hashes.push(hash_bytes(hash));
-        self.log.push(hash);
+        self.log.push_leaf(leaf);
         self.head = hash.to_string();
         self.observation_ids.insert(id_fingerprint(obs_id));
-        *self.missions.entry(mission.to_string()).or_default() += 1;
+        match self.missions.get_mut(mission) {
+            Some(n) => *n += 1,
+            None => {
+                self.missions.insert(mission.to_string(), 1);
+            }
+        }
         if !self.keyids.contains(keyid) {
             self.keyids.insert(keyid.to_string());
         }
@@ -305,6 +328,62 @@ fn scan_jsonl(path: &Path, notes: &mut Vec<String>, mut each: impl FnMut(&str) -
 
 fn parse_line<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, String> {
     serde_json::from_str(line).map_err(|_| "unparseable".to_string())
+}
+
+/// Look the signing key up in the trust store, verify the DSSE signature with it, then
+/// check the key's status and validity window. A key the submitter names but the
+/// operator did not enrol is untrusted, however valid its signature.
+fn check_key(trust: &TrustStore, robot_id: &str, env: &Envelope, seq: Option<u64>) -> Result<(), Outcome> {
+    let kid = env.keyid().to_string();
+    let Some(k) = trust.robot(robot_id, &kid) else {
+        return Err(Outcome::reject("untrusted_key", format!("key {kid} is not enrolled for {robot_id}")));
+    };
+    if !env.verify_with_b64(&k.public_key) {
+        return Err(Outcome::reject("bad_signature", format!("signature does not verify with {robot_id}'s enrolled key {kid}")));
+    }
+    match TrustStore::verdict(k, seq) {
+        KeyVerdict::Trusted => Ok(()),
+        KeyVerdict::Revoked => Err(Outcome::reject("revoked_key", format!("key {kid} for {robot_id} is revoked"))),
+        KeyVerdict::OutOfWindow => Err(Outcome::reject("key_out_of_window", format!("key {kid} is not valid for {robot_id} at this sequence number"))),
+        _ => Err(Outcome::reject("untrusted_key", format!("key {kid} is not usable for {robot_id}"))),
+    }
+}
+
+/// Batches at least this large are checked on several threads.
+const PARALLEL_MIN: usize = 32;
+
+/// A record that passed the stateless checks, with what the serial stage needs precomputed.
+struct Ready {
+    rec: Record,
+    hash: String,
+    leaf: [u8; 32],
+    line: String,
+}
+
+type Prepared = Result<Ready, Outcome>;
+
+/// Stateless checks of one envelope (see `Store::prepare_all`). Same order and codes as before.
+fn prepare(trust: &TrustStore, env: &Envelope) -> Prepared {
+    if env.payload_type != crate::crypto::RECORD_TYPE {
+        return Err(Outcome::reject("malformed", format!("payloadType must be {}", crate::crypto::RECORD_TYPE)));
+    }
+    let text = env.body_text().ok_or_else(|| Outcome::reject("malformed", "payload is not base64 UTF-8"))?;
+    let rec: Record = serde_json::from_str(&text).map_err(|e| Outcome::reject("malformed", format!("payload is not a valid record: {e}")))?;
+    if rec.schema != RECORD_SCHEMA || !model::valid_id(&rec.robot_id) {
+        return Err(Outcome::reject("malformed", "unsupported record schema or robot id"));
+    }
+    check_key(trust, &rec.robot_id, env, Some(rec.seq))?;
+    if rec.observation.robot_id != rec.robot_id {
+        return Err(Outcome::reject("invalid_observation", "observation.robot_id differs from the record's robot_id"));
+    }
+    let problems = rec.observation.structural_problems();
+    if !problems.is_empty() {
+        return Err(Outcome::reject("invalid_observation", problems.join("; ")));
+    }
+    let hash = env.payload_hash();
+    let leaf = merkle::leaf_hash(&hash);
+    let line = serde_json::to_string(env).expect("envelope");
+    Ok(Ready { rec, hash, leaf, line })
 }
 
 /// Write a small file atomically (temp file, fsync, rename).
@@ -544,53 +623,26 @@ impl Store {
         let _ = append_lines(&self.root.join("incidents.jsonl"), &[line]);
     }
 
-    /// Look the signing key up in the trust store, verify the DSSE signature with it, then
-    /// check the key's status and validity window. A key the submitter names but the
-    /// operator did not enrol is untrusted, however valid its signature.
     fn check_key(&self, robot_id: &str, env: &Envelope, seq: Option<u64>) -> Result<(), Outcome> {
-        let kid = env.keyid().to_string();
-        let Some(k) = self.trust.robot(robot_id, &kid) else {
-            return Err(Outcome::reject("untrusted_key", format!("key {kid} is not enrolled for {robot_id}")));
-        };
-        if !env.verify_with_b64(&k.public_key) {
-            return Err(Outcome::reject("bad_signature", format!("signature does not verify with {robot_id}'s enrolled key {kid}")));
-        }
-        match TrustStore::verdict(k, seq) {
-            KeyVerdict::Trusted => Ok(()),
-            KeyVerdict::Revoked => Err(Outcome::reject("revoked_key", format!("key {kid} for {robot_id} is revoked"))),
-            KeyVerdict::OutOfWindow => Err(Outcome::reject("key_out_of_window", format!("key {kid} is not valid for {robot_id} at this sequence number"))),
-            _ => Err(Outcome::reject("untrusted_key", format!("key {kid} is not usable for {robot_id}"))),
-        }
+        check_key(&self.trust, robot_id, env, seq)
     }
 
-    /// Validate one record against the current state (and the records already accepted
+    /// Validate one prepared record against the current state (and the records already accepted
     /// earlier in the same batch, reflected in `self`). Does not write.
-    fn admit(&mut self, env: &Envelope) -> Result<(Record, String), Outcome> {
-        if env.payload_type != crate::crypto::RECORD_TYPE {
-            return Err(Outcome::reject("malformed", format!("payloadType must be {}", crate::crypto::RECORD_TYPE)));
-        }
-        let text = env.body_text().ok_or_else(|| Outcome::reject("malformed", "payload is not base64 UTF-8"))?;
-        let rec: Record = serde_json::from_str(&text).map_err(|e| Outcome::reject("malformed", format!("payload is not a valid record: {e}")))?;
-        if rec.schema != RECORD_SCHEMA || !model::valid_id(&rec.robot_id) {
-            return Err(Outcome::reject("malformed", "unsupported record schema or robot id"));
-        }
-        self.check_key(&rec.robot_id, env, Some(rec.seq))?;
-        if rec.observation.robot_id != rec.robot_id {
-            return Err(Outcome::reject("invalid_observation", "observation.robot_id differs from the record's robot_id"));
-        }
-        let problems = rec.observation.structural_problems();
-        if !problems.is_empty() {
-            return Err(Outcome::reject("invalid_observation", problems.join("; ")));
-        }
-        let hash = env.payload_hash();
-        let st = self.robots.entry(rec.robot_id.clone()).or_default();
+    fn admit(&mut self, env: &Envelope, pre: Prepared) -> Result<Ready, Outcome> {
+        let ready = pre?;
+        let (rec, hash) = (&ready.rec, &ready.hash);
+        let st = match self.robots.get_mut(&rec.robot_id) {
+            Some(st) => st,
+            None => self.robots.entry(rec.robot_id.clone()).or_default(),
+        };
         let count = st.count();
         if rec.seq == 0 {
             return Err(Outcome::reject("malformed", "seq starts at 1"));
         }
         if rec.seq <= count {
-            if st.hashes[(rec.seq - 1) as usize] == hash_bytes(&hash) {
-                return Err(Outcome::Duplicate { robot_id: rec.robot_id, seq: rec.seq, record_hash: hash });
+            if st.hashes[(rec.seq - 1) as usize] == hash_bytes(hash) {
+                return Err(Outcome::Duplicate { robot_id: rec.robot_id.clone(), seq: rec.seq, record_hash: hash.clone() });
             }
             return Err(Outcome::reject("equivocation", format!(
                 "{} already has a different record {}: two histories signed by the same robot (restart with lost state, or a forged fork)",
@@ -610,8 +662,25 @@ impl Store {
                 return Err(Outcome::reject("unknown_correction_target", format!("no earlier observation {} from {}", c.corrects_observation_id, rec.robot_id)));
             }
         }
-        st.accept(&hash, &rec.observation.observation_id, &rec.observation.mission_id, env.keyid());
-        Ok((rec, hash))
+        st.accept_leaf(hash, ready.leaf, &rec.observation.observation_id, &rec.observation.mission_id, env.keyid());
+        Ok(ready)
+    }
+
+    /// The stateless checks of every envelope in a batch: decoding, schema, the signature against
+    /// the robot's enrolled key, the key's status, and the observation's structure. Signature
+    /// checks are about 85% of ingest CPU, so large batches are split across threads. The
+    /// stateful checks (sequence, chain, duplicates) then run in order in `admit`.
+    fn prepare_all(&self, envs: &[Envelope]) -> Vec<Prepared> {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+        if threads < 2 || envs.len() < PARALLEL_MIN {
+            return envs.iter().map(|e| prepare(&self.trust, e)).collect();
+        }
+        let chunk = envs.len().div_ceil(threads);
+        let trust = &self.trust;
+        std::thread::scope(|sc| {
+            let parts: Vec<_> = envs.chunks(chunk).map(|c| sc.spawn(move || c.iter().map(|e| prepare(trust, e)).collect::<Vec<_>>())).collect();
+            parts.into_iter().flat_map(|h| h.join().unwrap_or_else(|_| vec![])).collect()
+        })
     }
 
     /// Ingest a batch. Accepted records are written and fsynced before this returns.
@@ -629,15 +698,24 @@ impl Store {
             }
         }
         let mut outcomes = Vec::with_capacity(envs.len());
-        let mut per_robot: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut per_robot: BTreeMap<String, Vec<(String, [u8; 32])>> = BTreeMap::new();
         let mut receipts = Vec::new();
-        for env in envs {
-            match self.admit(env) {
-                Ok((rec, hash)) => {
+        let prepared = self.prepare_all(envs);
+        if prepared.len() != envs.len() {
+            return Err(self.fail("a signature-checking thread failed".into()));
+        }
+        for (env, pre) in envs.iter().zip(prepared) {
+            match self.admit(env, pre) {
+                Ok(Ready { rec, hash, leaf, line }) => {
                     let missing: Vec<String> = rec.observation.attachments.iter()
                         .filter(|a| !self.has_blob(&a.sha256)).map(|a| a.sha256.clone()).collect();
-                    per_robot.entry(rec.robot_id.clone()).or_default().push(serde_json::to_string(env).unwrap());
                     receipts.push(self.next_receipt(&rec.robot_id, rec.seq, &hash));
+                    match per_robot.get_mut(&rec.robot_id) {
+                        Some(v) => v.push((line, leaf)),
+                        None => {
+                            per_robot.insert(rec.robot_id.clone(), vec![(line, leaf)]);
+                        }
+                    }
                     outcomes.push(Outcome::Accepted { robot_id: rec.robot_id, seq: rec.seq, record_hash: hash, missing_attachments: missing });
                 }
                 Err(o) => {
@@ -653,7 +731,8 @@ impl Store {
         }
         // Records first, then receipts: a crash in between is repaired at the next open().
         // Any write failure (disk full, I/O error) stops the store: memory is now ahead of disk.
-        let written: u64 = per_robot.values().flatten().chain(receipts.iter()).map(|l| l.len() as u64 + 1).sum();
+        let written: u64 = per_robot.values().flatten().map(|(l, _)| l.len() as u64 + 1).sum::<u64>()
+            + receipts.iter().map(|l| l.len() as u64 + 1).sum::<u64>();
         for (rid, lines) in &per_robot {
             if let Err(e) = self.append_records(rid, lines) {
                 return Err(self.fail(format!("write failed for {rid}: {e}")));
@@ -729,7 +808,7 @@ impl Store {
 
     /// Append accepted record lines to a robot's active segment, sealing and rotating it when
     /// it reaches the segment limits. Each segment write is fsynced; seals are written atomically.
-    fn append_records(&mut self, rid: &str, lines: &[String]) -> std::io::Result<()> {
+    fn append_records(&mut self, rid: &str, lines: &[(String, [u8; 32])]) -> std::io::Result<()> {
         let segdir = self.root.join("robots").join(rid).join("segments");
         fs::create_dir_all(&segdir)?;
         let limits = self.segment_limits;
@@ -738,7 +817,7 @@ impl Store {
         // admit() already advanced the in-memory log; these are its last `lines.len()` records.
         let first_new = st.count() - lines.len() as u64 + 1;
         let mut chunk: Vec<&String> = Vec::new();
-        for (k, line) in lines.iter().enumerate() {
+        for (k, (line, leaf)) in lines.iter().enumerate() {
             let seq = first_new + k as u64;
             let len = line.len() as u64 + 1;
             if st.active.records > 0 && (st.active.records >= limits.records || st.active.bytes + len > limits.bytes) {
@@ -750,11 +829,10 @@ impl Store {
                 st.active = ActiveSegment { number: st.active.number + 1, first_seq: seq, records: 0, bytes: 0, prev_hash: last_hash,
                                             hasher: Sha256::new(), frontier: Frontier::new() };
             }
-            let h = hex::encode(st.hashes[(seq - 1) as usize]);
             st.active.hasher.update(line.as_bytes());
             st.active.hasher.update(b"\n");
-            st.active.frontier.push(&h);
-            st.disk.push(&h);
+            st.active.frontier.push_leaf(*leaf);
+            st.disk.push_leaf(*leaf);
             st.active.records += 1;
             st.active.bytes += len;
             chunk.push(line);
@@ -843,6 +921,21 @@ impl Store {
             let seal = segdir.join(segment::seal_name(n));
             f.is_file().then(|| (n, f, seal.is_file().then_some(seal)))
         }).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receipt_hash_is_unchanged() {
+        let r = Receipt { schema: RECEIPT_SCHEMA.into(), seq: 7, prev: "ab\"c".into(), station_id: "st-1".into(), robot_id: "r-1".into(),
+                          robot_seq: 3, record_hash: "f".repeat(64), received_time: "2026-11-06T00:00:00.000Z".into(), hash: String::new() };
+        // the original definition: the sorted-key JSON object without "hash"
+        let mut v = serde_json::to_value(&r).unwrap();
+        v.as_object_mut().unwrap().remove("hash");
+        assert_eq!(r.compute_hash(), sha256_hex(v.to_string().as_bytes()));
     }
 }
 

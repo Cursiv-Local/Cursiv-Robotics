@@ -1,0 +1,22 @@
+{
+  "schema": "cursiv-bench-transfer-1",
+  "measured_on": "Linux cloud container, 4 vCPUs (Intel Xeon 2.80 GHz, AVX2, no SHA extensions); software, not robot hardware",
+  "date": "2026-11-06",
+  "method": "median of 3 runs; before = commit caaf645 built in a separate worktree, after = this change; same machine, same session",
+  "station_ingest_records_per_s": {
+    "note": "cargo run --release -p cursiv-evidence --example bench -- 5000 3 with CURSIV_BENCH_BATCH=<n>; store API, no HTTP",
+    "batch_1": {"before": 1261, "after": 1221},
+    "batch_10": {"before": 4553, "after": 4616},
+    "batch_100": {"before": 7341, "after": 14613},
+    "batch_1000": {"before": 8270, "after": 17198}
+  },
+  "end_to_end_sync_records_per_s": {
+    "note": "15,000 pre-signed records from a cursiv_ros2 StreamingAgent outbox to a cursiv-bridge on loopback (HTTP), sync(batch=<n>)",
+    "batch_100": {"before": 4733, "after": 9435},
+    "batch_500": {"before": 5252, "after": 11210}
+  },
+  "per_record_costs_before_us": {"parse_envelope": 1.9, "ed25519_verify": 62.9, "decode_and_check_record": 3.8, "payload_hash": 5.3, "reserialise": 1.4},
+  "wire_size": {"bytes_per_record": 1754, "gzip_level_6_ratio": 9.0, "gzip_level_1_ratio": 7.3, "gzip_level_6_client_us_per_record": 17.4,
+                "note": "84 records of the committed sample package; compression is used automatically when the station is not on loopback"},
+  "rejected_change": "HTTP keep-alive in the Python client made batch-100 sync 3.9x slower (6,851 -> 1,760 records/s): tiny_http writes response headers and body separately without TCP_NODELAY, so each reused-connection request waited ~40 ms for a delayed ACK. One connection per request is kept."
+}

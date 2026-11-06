@@ -33,6 +33,11 @@ fn root_of(leaves: &[[u8; 32]]) -> [u8; 32] {
     }
 }
 
+/// The RFC 6962 leaf hash of a record payload hash (hex), for [`Frontier::push_leaf`].
+pub fn leaf_hash(hash_hex: &str) -> [u8; 32] {
+    leaf(hash_hex)
+}
+
 /// Root (hex) over the given record payload hashes, in order.
 pub fn root(hashes: &[String]) -> String {
     let leaves: Vec<[u8; 32]> = hashes.iter().map(|h| leaf(h)).collect();
@@ -60,7 +65,13 @@ impl Frontier {
 
     /// Add the next record payload hash (hex).
     pub fn push(&mut self, hash_hex: &str) {
-        let mut node_hash = leaf(hash_hex);
+        self.push_leaf(leaf(hash_hex));
+    }
+
+    /// Add a leaf already computed with [`leaf_hash`] (saves re-hashing when one record goes
+    /// into several frontiers).
+    pub fn push_leaf(&mut self, leaf: [u8; 32]) {
+        let mut node_hash = leaf;
         let mut size = 1u64;
         while let Some(&(s, h)) = self.stack.last() {
             if s != size {

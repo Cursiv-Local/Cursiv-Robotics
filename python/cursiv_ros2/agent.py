@@ -147,7 +147,7 @@ class StreamingAgent:
         self._fh.close()
 
     # --- synchronization -----------------------------------------------------
-    def sync(self, batch: int = 200) -> dict:
+    def sync(self, batch: int = 500) -> dict:
         """Upload pending attachments, then send records from the station's head. Safe to repeat
         and safe while recording continues; returns {"link": "up" | "down" | "station_full", ...}."""
         # A consistent snapshot: everything up to `end` bytes / `count` records, and a checkpoint
@@ -181,7 +181,7 @@ class StreamingAgent:
                     if n <= have:
                         offset += len(line)
                         continue
-                    chunk.append(json.loads(line))
+                    chunk.append(line)
                     chunk_bytes += len(line)
                     if len(chunk) == batch:
                         r = self._send(chunk)
@@ -204,8 +204,9 @@ class StreamingAgent:
         except (LinkDown, ConnectionError, OSError) as e:
             return {"link": "down", "error": str(e), "pending": self.count - self.acked}
 
-    def _send(self, chunk: list[dict]) -> dict | None:
-        status, data, _ = self.client.submit(chunk)
+    def _send(self, chunk: list[bytes]) -> dict | None:
+        # the stored lines are sent as they are: no decoding and re-encoding of every record
+        status, data, _ = self.client.submit_lines(chunk)
         if status == 507:
             return {"link": "station_full", "pending": self.count - self.acked}
         for r in data.get("results", [data]):

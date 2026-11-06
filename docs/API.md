@@ -85,7 +85,7 @@ Example: [`examples/python/quickstart.py`](../examples/python/quickstart.py).
 ## Evidence ingestion (HTTP)
 
 The robot side is any language that can sign Ed25519 DSSE envelopes. Send them with
-`POST /v1/observations` (one record or `{"records": [...]}`), `PUT /v1/attachments/<sha256>`, `POST /v1/checkpoints`
+`POST /v1/observations` (one record or `{"records": [...]}`, optionally `Content-Encoding: gzip`; the decompressed body is limited to 8 MiB, and an unsupported encoding gets 415), `PUT /v1/attachments/<sha256>`, `POST /v1/checkpoints`
 and `POST /v1/exports {"name", "format"}`. The full reference is in [ROBOTICS_API.md](ROBOTICS_API.md).
 
 ## Scientific metadata and provenance

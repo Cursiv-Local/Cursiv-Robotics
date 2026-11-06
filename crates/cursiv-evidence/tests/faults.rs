@@ -774,3 +774,33 @@ fn derived_uncertainty_is_propagated_and_checked() {
     assert!(rs.flags.iter().any(|f| f.code == "uncertainty_mismatch"));
     assert!(rs.flags.iter().any(|f| f.code == "uncertainty_unsupported"));
 }
+
+/// Large batches are checked on several threads; outcomes must be exactly those of checking the
+/// records one at a time, in order, including every kind of rejection mixed into the batch.
+#[test]
+fn parallel_batch_checks_match_one_at_a_time() {
+    let mut a = lab("par-a");
+    let mut b = lab("par-b");
+    let mut envs = vec![];
+    let r = &mut a.robots[0];
+    for k in 0..120u64 {
+        let mut o = r.obs(k + 1, "air_temperature", 10.0 + k as f64, "2026-11-05T10:00:00Z");
+        if k % 17 == 5 {
+            o.observation_id = "../escape".into(); // invalid observation: rejected, chain continues without it
+        }
+        let mut e = r.record(o);
+        if k % 23 == 11 {
+            e.signatures[0].sig = e.signatures[0].sig.chars().rev().collect(); // bad signature
+        }
+        envs.push(e);
+    }
+    envs.push(envs[3].clone()); // duplicate
+    envs.insert(40, envs[60].clone()); // out of order: a gap
+    let batch: Vec<String> = a.store.ingest_batch(&envs).unwrap().iter().map(|o| serde_json::to_string(o).unwrap()).collect();
+    let single: Vec<String> = envs.iter().map(|e| serde_json::to_string(&b.store.ingest_batch(std::slice::from_ref(e)).unwrap()[0]).unwrap()).collect();
+    assert_eq!(batch.len(), 122);
+    assert_eq!(batch, single, "parallel checks changed an outcome");
+    assert!(batch.iter().any(|o| o.contains("bad_signature")) && batch.iter().any(|o| o.contains("invalid_observation"))
+            && batch.iter().any(|o| o.contains("duplicate")) && batch.iter().any(|o| o.contains("\"gap\"")));
+    assert_eq!(a.store.robot_count("rover-01"), b.store.robot_count("rover-01"));
+}

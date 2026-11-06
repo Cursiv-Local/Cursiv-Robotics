@@ -49,6 +49,7 @@ simulated robots. **Experimental** means it works but the interface may change. 
 | Operator trust store with rotation, validity windows, revocation and live reload; keys never trusted from packages | Implemented | `trust.rs`, `cursiv-bridge` |
 | BagIt (RFC 8493) packages with a station-signed manifest; atomic export | Implemented | `package.rs` |
 | Segmented logs with station-signed seals (package and store format 2); format 1 still written on request and verified; safe store migration | Implemented | `segment.rs`, `store.rs`, [formats](docs/FORMATS.md) |
+| Fast transfer: parallel signature checks (station ingest 2x), gzip on the wire for remote stations (records 9x smaller) | Implemented | [test results](docs/ROBOTICS_TEST_RESULTS.md#faster-record-transfer-2026-11-06) |
 | Streaming verification of multi-gigabyte packages (5 GB verified at 194 MiB peak; memory about 80 bytes per record, independent of record size) | Implemented | `verify.rs`, [formats](docs/FORMATS.md#verification-memory) |
 | Standalone verifier with five separate verdicts, exit codes and JSON output | Implemented | `crates/cursiv-verify` |
 | Loopback ingestion service: Host/Origin checks, token auth off-host, body and batch limits, storage quota, fail-stop on write errors, crash recovery | Implemented | `crates/cursiv-bridge` |
@@ -134,7 +135,7 @@ cd python; py -m cursiv_sim.bench_scale --sizes-gb 0.1 1 2 --dir D:\bench   # mu
 ## Known limitations
 
 - Nothing has run on a physical robot, sensor or single-board computer.
-- Station ingest on Windows is slow: 249 records/s on the CI runner (two fsyncs per batch), against about 15,000 records/s on Linux.
+- Station ingest on Windows is slow with one batch at a time: 249 records/s on the CI runner, flush-bound. Concurrent senders are coalesced. Larger batches help most there.
 - Verification memory grows by about 80 bytes per record (indexes for receipts and duplicate checks), so
   a 50-million-record package would need about 4 GB. Science checks need the records in memory and report
   `not_assessed` above `--max-records`.

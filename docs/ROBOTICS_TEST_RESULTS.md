@@ -30,6 +30,35 @@ desktop has not been tested directly; Windows Server CI is the closest check ava
 | Interoperability (`tests/test_interop.py`, optional packages installed; earlier run on this branch's base) | `python3 -m pytest tests -q` | 4 passed |
 | One-command demo | `python python/cursiv_demo` | DEMO PASSED: expected results identical, tampering detected (5 error codes), tampered copy refused at import, source unchanged |
 
+## Faster record transfer (2026-11-06)
+
+Raw data: `bench/results/2026-11-06-linux-transfer.json` (medians of 3 runs; before and after built from the same branch
+on the same 4-vCPU Linux container, which is about half as fast as the one used on 2026-11-05).
+
+| Path | Batch | Before (records/s) | After (records/s) |
+|---|---|---|---|
+| Station ingest (store API) | 100 | 7,341 | 14,613 |
+| Station ingest (store API) | 1,000 | 8,270 | 17,198 |
+| Station ingest (store API) | 1 / 10 | 1,261 / 4,553 | 1,221 / 4,616 (flush-bound; below the parallel threshold) |
+| Robot outbox to station over HTTP (loopback) | 100 | 4,733 | 9,435 |
+| Robot outbox to station over HTTP (loopback) | 500 | 5,252 | 11,210 |
+
+What changed:
+- **Parallel checks.** Signature verification was 84% of per-record station CPU (63 of 75 µs). The stateless checks
+  now run across threads for batches of 32 or more; the stateful checks stay in order. `parallel_batch_checks_match_one_at_a_time`
+  proves the outcomes are identical, with bad signatures, invalid observations, duplicates and gaps mixed in.
+- **Cheaper serial path.** Receipt hashes are computed without building a JSON tree, with byte-identical results
+  (`receipt_hash_is_unchanged`); leaf hashes and record lines come from the parallel stage.
+- **Single parse.** The bridge parses a batch straight into envelopes. Agents send stored lines unchanged.
+- **gzip.** Request bodies are accepted gzip-encoded, with the decompressed size capped (bombs get 413). Records are
+  9.0 times smaller at level 6. The client compresses automatically when the station is not on loopback.
+- **Tried and rejected:** HTTP keep-alive was 3.9 times slower with tiny_http, which does not set TCP_NODELAY and so
+  waits for delayed ACKs.
+
+On a slow link the wire size dominates. At 1 Mbit/s (125,000 bytes/s) that is about 71 records/s uncompressed and
+about 640 records/s with gzip. These are computed from the measured 1,754 bytes per record and the 9.0x ratio, not
+measured over a real radio, and ignore protocol overhead.
+
 ## Interoperability and scalability upgrade (2026-11-05, branch claude/interop-scalability)
 
 | Suite | Result |
