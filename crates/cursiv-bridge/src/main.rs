@@ -39,6 +39,50 @@ struct App {
     exports: PathBuf,
 }
 
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
+}
+
+/// Read-only station page for a person at the station: robots, records, missions and problems.
+/// No scripts, no external resources, every value escaped; it refreshes itself every 5 seconds.
+fn status_page(st: &serde_json::Value, used: u64, failed: Option<&str>) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut rows = String::new();
+    if let Some(robots) = st["robots"].as_object() {
+        for (id, r) in robots {
+            let missions = r["missions"].as_object().map(|m| m.iter().map(|(k, v)| format!("{} ({})", esc(k), v)).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            rows += &format!("<tr><td>{}</td><td class=n>{}</td><td>{}</td><td class=n>{}</td><td><code>{}</code></td></tr>",
+                             esc(id), r["records"], missions, r["segment"], esc(&r["head"].as_str().unwrap_or("").chars().take(16).collect::<String>()));
+        }
+    }
+    if rows.is_empty() {
+        rows = "<tr><td colspan=5>No robot has sent records yet.</td></tr>".into();
+    }
+    let notes: String = st["recovery_notes"].as_array().map(|a| a.iter().filter_map(|n| n.as_str()).map(|n| format!("<li>{}</li>", esc(n))).collect()).unwrap_or_default();
+    let alert = match failed {
+        Some(f) => format!("<p class=bad><b>The store stopped accepting writes:</b> {}</p>", esc(f)),
+        None => "<p class=ok>Accepting records.</p>".into(),
+    };
+    let html = format!(r#"<!doctype html><html lang=en><head><meta charset=utf-8><meta http-equiv=refresh content=5>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Cursiv station {sid}</title>
+<style>body{{font:15px system-ui,sans-serif;margin:24px;max-width:960px;color:#1b1f23;background:#fff}}
+table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left}}.n{{text-align:right}}
+.ok{{color:#11622f}}.bad{{color:#a1130b}}code{{font-size:13px}}small{{color:#555}}
+@media (prefers-color-scheme:dark){{body{{background:#16181b;color:#e6e6e6}}td,th{{border-color:#333}}.ok{{color:#5fd38a}}.bad{{color:#ff8a80}}small{{color:#aaa}}}}</style>
+</head><body><h1>Station {sid}</h1>{alert}
+<p>{n} robot(s), {receipts} receipt(s), {mb:.1} MB stored. Store format {fmt}. <small>Read-only; refreshes every 5 seconds. Export and verify packages with the API or <code>cursiv-verify</code>.</small></p>
+<table><tr><th>Robot</th><th class=n>Records</th><th>Missions (records)</th><th class=n>Active segment</th><th>Head</th></tr>{rows}</table>
+{notes_block}</body></html>"#,
+        sid = esc(st["station_id"].as_str().unwrap_or("")), alert = alert, n = st["robots"].as_object().map_or(0, |o| o.len()),
+        receipts = st["receipts"], mb = used as f64 / 1e6, fmt = st["store_format"], rows = rows,
+        notes_block = if notes.is_empty() { String::new() } else { format!("<h2>Recovery notes</h2><ul>{notes}</ul>") });
+    Response::from_string(html)
+        .with_status_code(200)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+        .with_header(Header::from_bytes("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+        .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap())
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
@@ -193,6 +237,10 @@ impl App {
     fn route(&self, req: &mut Request, method: &Method, path: &str) -> Response<std::io::Cursor<Vec<u8>>> {
         let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
         match (method, seg.as_slice()) {
+            (Method::Get, [""]) | (Method::Get, ["status"]) => {
+                let st = match self.store() { Ok(g) => (g.status(), g.used_bytes(), g.failed().map(String::from)), Err(r) => return r };
+                status_page(&st.0, st.1, st.2.as_deref())
+            }
             (Method::Get, ["v1", "health"]) => json(200, serde_json::json!({"status": "ok", "service": "cursiv-bridge", "version": env!("CARGO_PKG_VERSION"), "time": model::now_utc()})),
             (Method::Get, ["v1", "openapi.json"]) => Response::from_string(OPENAPI).with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
             (Method::Get, ["v1", "status"]) => json(200, match self.store() { Ok(g) => g, Err(r) => return r }.status()),

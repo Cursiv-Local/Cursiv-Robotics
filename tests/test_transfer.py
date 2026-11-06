@@ -73,3 +73,21 @@ def test_client_compression_policy_and_raw_lines(lab):
     assert status == 201 and data["accepted"] == 30
     status, data, _ = c.submit_lines([json.dumps(e).encode() for e in envs[:5]])
     assert status == 200 and all(r["status"] == "duplicate" for r in data["results"]), "resending is harmless"
+
+
+def test_station_status_page_is_read_only_html(lab):
+    records(lab, 3)
+    agent = RobotAgent("rover-01", lab.robot_state, lab.client, mission_id="t")
+    assert agent.sync()["link"] == "up"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"http://127.0.0.1:{lab.port}/", timeout=30) as r:
+        html, headers = r.read().decode(), r.headers
+    assert headers["Content-Type"].startswith("text/html") and "default-src 'none'" in headers["Content-Security-Policy"]
+    assert "<script" not in html.lower() and "rover-01" in html and "Accepting records." in html
+    assert "<td class=n>3</td>" in html, html
+    req = urllib.request.Request(f"http://127.0.0.1:{lab.port}/", method="POST", data=b"x")
+    try:
+        opener.open(req, timeout=30)
+        raise AssertionError("POST / must not be accepted")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404

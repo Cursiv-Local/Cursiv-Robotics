@@ -66,6 +66,13 @@ simulated robots. **Experimental** means it works but the interface may change. 
 | IOOS QARTOD QC (`ioos_qc`) | Experimental (optional package) | `qartod.py` |
 | Hardware-backed keys (TPM or secure element), real sensors and robots, field networks | Planned (needs hardware) | [roadmap](docs/ROBOTICS_ROADMAP.md) |
 
+## Without Rust
+
+Portable builds for Windows, macOS and Linux (`cursiv-verify`, `cursiv-bridge`, the Python tools and the sample
+package) are built by `.github/workflows/release.yml`. Each build verifies the sample package before it is packaged.
+A version tag publishes them as a GitHub release with SHA-256 sums. A running station shows a read-only status
+page at `http://127.0.0.1:8750/`.
+
 ## Verify a package yourself
 
 ```powershell

@@ -1,0 +1,73 @@
+name: Release builds
+
+# Portable builds of cursiv-verify and cursiv-bridge for Windows, macOS and Linux, so nobody
+# needs Rust to verify a package. A manual run (workflow_dispatch) only uploads build artifacts;
+# a GitHub release is created only when a version tag (v*) is pushed.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x86_64, exe: ".exe" }
+          - { os: ubuntu-latest, name: linux-x86_64, exe: "" }
+          - { os: macos-latest, name: macos-arm64, exe: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked -p cursiv-verify -p cursiv-bridge
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="cursiv-robotics-${GITHUB_REF_NAME//\//-}-${{ matrix.name }}"
+          mkdir -p "dist/$name/bin"
+          cp "target/release/cursiv-verify${{ matrix.exe }}" "target/release/cursiv-bridge${{ matrix.exe }}" "dist/$name/bin/"
+          cp -r python scripts docs README.md LICENSE NOTICE.md "dist/$name/"
+          mkdir -p "dist/$name/examples" && cp -r examples/sample-package "dist/$name/examples/"
+          find "dist/$name" -name __pycache__ -prune -exec rm -rf {} +
+          # the binary just built must verify the sample package on this OS before it is shipped
+          "dist/$name/bin/cursiv-verify${{ matrix.exe }}" package "dist/$name/examples/sample-package/sample-buoy-1-package" \
+              --trust "dist/$name/examples/sample-package/trust.json"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then 7z a -tzip "$name.zip" "$name" > /dev/null; else zip -qr "$name.zip" "$name"; fi
+          (sha256sum "$name.zip" 2>/dev/null || shasum -a 256 "$name.zip") > "$name.zip.sha256"
+          ( cd "$name/bin" && (sha256sum * 2>/dev/null || shasum -a 256 *) ) > "$name.binaries.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the GitHub release with the zips and their SHA-256 sums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat dist/*.zip.sha256 > dist/SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --title "Cursiv Robotics $GITHUB_REF_NAME" \
+            --notes "Portable builds (no Rust needed). Unzip, then run bin/cursiv-verify package <folder> --trust <trust.json>. Software only: not validated on robot hardware. SHA256SUMS.txt lists every zip."

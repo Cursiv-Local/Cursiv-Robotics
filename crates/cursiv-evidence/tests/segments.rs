@@ -339,3 +339,26 @@ fn read_failures_and_unsupported_formats_never_produce_a_verified_report() {
     assert_eq!(r.status, "incomplete");
     assert!(!r.all_pass());
 }
+
+#[test]
+fn the_plain_summary_says_what_went_wrong() {
+    let mut l = lab("plain", 4);
+    l.add(8);
+    let p = l.export("pkg");
+    let ok = verify::verify_package(&p, Some(&l.trust));
+    assert!(ok.summary[0].starts_with("Verified: 8 record(s) from 1 robot(s)"), "{:?}", ok.summary);
+    assert!(ok.summary.iter().any(|s| s.contains("SYNTHETIC")));
+    let bad = copy_pkg(&p, "plain-bad");
+    let f = segdir(&bad).join(segment::segment_name(1));
+    let t = fs::read_to_string(&f).unwrap();
+    let mut lines: Vec<String> = t.lines().map(String::from).collect();
+    let mut env: Envelope = serde_json::from_str(&lines[0]).unwrap();
+    env.payload = base64_encode(env.body_text().unwrap().replacen("\"value\":1", "\"value\":2", 1).as_bytes());
+    lines[0] = serde_json::to_string(&env).unwrap();
+    fs::write(&f, lines.join("\n") + "\n").unwrap();
+    let r = verify::verify_package(&bad, Some(&l.trust));
+    assert!(r.summary[0].starts_with("NOT VERIFIED"), "{:?}", r.summary);
+    assert!(r.summary.iter().any(|s| s.contains("1 record(s) were changed after they were signed")), "{:?}", r.summary);
+    let none = verify::verify_package(&p, None);
+    assert!(none.summary[0].starts_with("Not fully verified") && none.summary.iter().any(|s| s.contains("No trust store")));
+}
