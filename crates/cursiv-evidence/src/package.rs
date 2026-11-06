@@ -39,11 +39,15 @@ impl Default for ExportOptions {
 }
 
 /// A package-relative path that cannot escape the package.
+/// Canonical names only: every '/'-separated segment must be a normal name. Rust's
+/// `Path::components` silently drops "." and empty segments ("a/./b", "a//b", "a/"), so those are
+/// refused explicitly: one file must have exactly one name in a manifest.
 pub fn safe_rel(name: &str) -> bool {
     let p = Path::new(name);
     !name.is_empty()
         && !name.contains('\\')
         && !name.contains(':')
+        && name.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
         && p.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
