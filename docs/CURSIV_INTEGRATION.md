@@ -1,12 +1,20 @@
 # Cursiv integration contract (workspace contract 1; package formats 1 and 2)
 
-**Status:** the Robotics side is **implemented and tested**: the package format, the reference importer, the
-sample package, and ingestion of the research summary by Cursiv's own `core/documents.py`. The Cursiv side is
-**implemented on Cursiv branch `claude/robot-evidence`** (not yet merged or released): `core/robot_evidence.py`
-finds, verifies with the bundled `cursiv-verify`, and imports packages following the rules below, adds each
-research summary to the document library, and checks that answers cite only `robot/observation_id`s from
-imported packages. See Cursiv's `docs/ROBOT-EVIDENCE.md`. It has been tested with the fixture packages only,
-not with a package from a real drive or robot.
+**Status:** both sides are **implemented and tested in software**. The Robotics side covers the package
+format, the reference importer and the sample package. The Cursiv side has been on Cursiv `main` since
+Cursiv PR #88 (`core/robot_evidence.py`, user guide `docs/ROBOT-EVIDENCE.md`). It is **not yet in a Cursiv
+release**: the latest release, 3.14-U118, does not include it. It has been tested with fixture and simulated
+packages only, not with a package from a real drive, sensor or robot.
+
+### Compatible versions
+
+| Cursiv | Robotics importer it vendors | `cursiv-verify` it builds and bundles | Package formats |
+|---|---|---|---|
+| `main` after PR #88 (unreleased) | `48151c0` | `1e244e3` (`scripts/get_cursiv_verify.py`) | 1, 2 |
+| next Cursiv change (to do) | this branch's hardened importer (fail-closed source and copy checks, completeness, timeout, "fully verified") | the same commit | 1, 2 |
+
+Cursiv names the vendored commit in the header of `core/robot_evidence_import.py` and the verifier commit in
+`scripts/get_cursiv_verify.py`. When either changes here, update both there in the same Cursiv change.
 
 ## Workflow
 
@@ -49,12 +57,25 @@ Compatibility rule: version 1 importers ignore unknown *files* in `data/` only i
 
 ## Import rules (implemented in the reference importer and required of Cursiv)
 
-1. **Never modify the source.** The importer fingerprints every source file before and after (`source_unchanged` in the result) and copies; it never moves.
-2. **Verify before use.** Evidence enters `packages/` only if structure, integrity and attachments pass and authenticity is `pass`, or `not_assessed` when no trust store is supplied, which the summary then states. Anything else is refused, or kept in `quarantine/` with `--quarantine` and marked QUARANTINED.
-3. **Re-verify the copy.** The copy must verify exactly like the source, otherwise the import is abandoned (disk or transfer fault).
-4. **Keys are never taken from packages.** Trust comes from the operator's `cursiv-trust-1` files (`--trust`, repeatable).
-5. **Preserve everything.** Raw records, original attachments, provenance, processing history, uncertainty, calibration and the full verification report are kept. Derived views (`views/`) can be regenerated and are labelled as such.
-6. **Synthetic stays synthetic**, and **interpretations stay interpretations**: AI-authored findings appear only under "Interpretations recorded with the evidence (claims, not observations)", with the model named.
+1. **Never modify the source, and fail closed if it changes.** The importer fingerprints every source file (path, size and
+   content) before verification, then again after copying. If the source changed, or the copy is not byte-identical to that
+   snapshot, the import is abandoned, the partial copy is removed, and the person is asked to import again from a stable source.
+   It copies; it never moves.
+2. **Verify before use.** Evidence enters `packages/` only if structure, integrity and attachments pass, completeness did not fail
+   (no records missing), and authenticity is `pass`, or `not_assessed` when no trust store is supplied. Anything else is refused,
+   or kept in `quarantine/` with `--quarantine` and marked QUARANTINED.
+3. **Never present less than full verification as full verification.** `fully_verified` is true only when the verifier's status
+   is `verified` (every verdict an unqualified pass), the science and reasoning checks ran on every record, no derived result or
+   finding is invalid, and there are no scientific anomalies. Otherwise the result's `caveats` say why in plain words, and the
+   research summary opens with "NOT FULLY VERIFIED" and the same reasons. Scientific problems do not stop an import; they stop it
+   being called fully verified.
+4. **Re-verify the copy.** The copy must also verify exactly like the source.
+5. **Bounded verification time.** The verifier is stopped after `CURSIV_VERIFY_TIMEOUT` seconds (default 3600), and nothing is
+   imported. A mission's science profile can be supplied with `--profile`; without one, the verifier's general profile applies
+   (no mission region).
+6. **Keys are never taken from packages.** Trust comes from the operator's `cursiv-trust-1` files (`--trust`, repeatable).
+7. **Preserve everything.** Raw records, original attachments, provenance, processing history, uncertainty, calibration and the full verification report are kept. Derived views (`views/`) can be regenerated and are labelled as such.
+8. **Synthetic stays synthetic**, and **interpretations stay interpretations**: AI-authored findings appear only under "Interpretations recorded with the evidence (claims, not observations)", with the model named.
 
 Workspace layout:
 
@@ -68,19 +89,19 @@ views/<name>/verification.json  full verifier report (integrity, science, reason
 views/<name>/research-summary.md  citations to individual records; anomalies; derived results with recomputation status
 ```
 
-## Required changes in the Cursiv application (proposed, not made)
+## In the Cursiv application (implemented on Cursiv `main`, unreleased)
 
-| # | Change | Cursiv file(s) | Notes |
+| # | What | Cursiv file(s) | State |
 |---|---|---|---|
-| 1 | Vendor the importer (standard library only) | new `cursiv_engine/core/robotics_evidence.py` (copy of `python/cursiv_integration/importer.py`) | keep the MIT notice; pin `CONTRACT_VERSION = "1"` |
-| 2 | Ship `cursiv-verify` with the app | `scripts/build_release.py`, `installer/cursiv_setup.iss` | include the binary in the signed release manifest (owner signing covers it) |
-| 3 | Command `import evidence <folder or drive>` behind a confirm card | `launcher/commands_system.py`, `cursiv_engine/core/intent.py` | show the verdicts before importing; never auto-import |
-| 4 | Offer discovered packages when a drive is attached | `launcher/usb_sync.py` (`plan_import`) | list only; the person confirms |
-| 5 | Robotics trust store, managed in Settings | new `~/.cursiv/robotics-trust.json`; `launcher/settings_dialog.py` | **no trust-on-first-use** (unlike `fieldsync` team pins); keys added deliberately |
-| 6 | Show the workspace in Research | `launcher/research_workspace.py` (`ResearchWorkspace`) | packages, verdicts, anomalies; open `research-summary.md` |
-| 7 | Feed the summary to the document library and report writer | `cursiv_engine/core/documents.py` (`add`) | tested from this repo: `tests/test_integration.py::test_cursiv_document_library_ingests_the_research_summary` |
-| 8 | Citation check in answers | `cursiv_engine/core/claims.py` / `core/verify.py` | flag cited `robot/observation_id`s that are not in an imported package |
-| 9 | Tests in Cursiv | `tests/test_robotics_evidence.py` | reuse `examples/sample-package` and the tampered/untrusted cases from `tests/test_integration.py` |
+| 1 | Vendored importer and layout | `cursiv_engine/core/robot_evidence_import.py`, `robot_evidence_layout.py` | done; to be updated to the hardened importer |
+| 2 | Ship `cursiv-verify` with the app | `scripts/get_cursiv_verify.py`, `launcher/build.spec` | bundled when built into `tools/`; CI builds it |
+| 3 | Commands with a preview first: `robot evidence find / import / verify / show` | `cursiv_engine/core/robot_evidence.py`, `launcher/command_dispatch.py` | done; plain words only preview |
+| 4 | Packages listed when a drive is compared | `launcher/usb_maker.py` | done; never imports |
+| 5 | Robotics trust store, keys added deliberately (`robot trust add <file>` then `confirm`) | `~/.cursiv/robotics/trust.json` | done; **no trust on first use** |
+| 6 | Import from Research Files | `launcher/research_workspace.py` | done; not yet run in the GUI |
+| 7 | Summary in the document library | `cursiv_engine/core/documents.py` (`add`) | done |
+| 8 | Citation check in answers | `cursiv_engine/chat/completion.py` | done: unknown `robot/observation_id`s are flagged |
+| 9 | Tests | `tests/test_robot_evidence.py`, CI job `robot-evidence` (Windows, Linux) | done |
 
 ## Try it
 

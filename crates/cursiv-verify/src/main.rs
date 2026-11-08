@@ -46,7 +46,7 @@ fn main() -> ExitCode {
                 None => None,
             };
             let profile = match flag_value(&args, "--profile") {
-                None => Profile::survey_default(),
+                None => Profile::general(),
                 Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Profile>(&t).map_err(|e| e.to_string())) {
                     Ok(pr) => pr,
                     Err(e) => {
