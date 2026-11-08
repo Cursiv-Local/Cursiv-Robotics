@@ -408,6 +408,22 @@ fn science_flags_range_time_drift_and_contradiction_separately_from_integrity() 
 }
 
 #[test]
+fn the_default_profile_assumes_no_mission_region() {
+    let mut l = lab("noregion");
+    let r = &mut l.robots[0];
+    let mut far = r.obs(1, "air_temperature", 15.0, "2026-11-05T10:00:00Z");
+    far.location.as_mut().unwrap().lat = -33.9; // nowhere near the survey test field
+    let env = r.record(far);
+    l.store.ingest_batch(&[env]).unwrap();
+    let p = l.export("pkg");
+    let rep = verify::verify_package(&p, Some(&l.trust));
+    let general = science::validate(&rep.records, &rep.receipts, &Profile::general());
+    assert!(!general.counts.contains_key("outside_mission_region"), "{:?}", general.counts);
+    let survey = science::validate(&rep.records, &rep.receipts, &Profile::survey_default());
+    assert!(survey.counts.contains_key("outside_mission_region"), "a profile with a region still checks it");
+}
+
+#[test]
 fn corrections_preserve_the_original() {
     let mut l = lab("correct");
     let r = &mut l.robots[0];

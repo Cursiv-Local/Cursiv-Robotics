@@ -65,7 +65,14 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// The profile used by the simulation lab's survey missions.
+    /// The profile `cursiv-verify` uses when no `--profile` is given: the survey types and
+    /// limits, but no mission region, because a default cannot know where a package was
+    /// recorded (with one, every package recorded elsewhere would be flagged as out of region).
+    pub fn general() -> Self {
+        Profile { name: "general-1".into(), region: None, ..Self::survey_default() }
+    }
+
+    /// The profile used by the simulation lab's survey tests (its region is the test field).
     pub fn survey_default() -> Self {
         let t = |unit: &str, min: f64, max: f64, r: Option<f64>, w: Option<f64>| TypeProfile {
             unit: unit.into(), min: Some(min), max: Some(max), requires_attachment: false, compare_radius_m: r, compare_window_s: w,

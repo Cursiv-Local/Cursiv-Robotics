@@ -83,6 +83,83 @@ def test_tampered_or_untrusted_packages_are_not_imported(mission, tmp_path):
     assert n["imported"] and "Authenticity not assessed" in Path(n["summary"]).read_text()
 
 
+def test_a_source_that_changes_during_import_is_not_imported(mission, tmp_path, monkeypatch):
+    pkg, trust = mission
+    src = tmp_path / "drive" / pkg.name
+    shutil.copytree(pkg, src)
+    real = importer.verify
+
+    def verify_then_someone_writes(p, t, timeout=None, profile=None):
+        out = real(p, t, timeout, profile)
+        if Path(p) == src:
+            (src / "bag-info.txt").write_text((src / "bag-info.txt").read_text() + "Note: written during import\n")
+        return out
+    monkeypatch.setattr(importer, "verify", verify_then_someone_writes)
+    ws = tmp_path / "ws"
+    s = importer.import_package(src, ws, trust)
+    assert not s["imported"] and s["source_unchanged"] is False and "source changed during import" in s["reason"]
+    assert not (ws / "packages" / pkg.name).exists() and not list((ws / "packages").glob(".importing-*")), "nothing is left behind"
+    assert not (ws / "workspace.json").exists()
+
+
+def test_a_copy_that_is_not_byte_identical_is_not_imported(mission, tmp_path, monkeypatch):
+    pkg, trust = mission
+    real = shutil.copytree
+
+    def faulty_copy(a, b, *args, **kw):
+        out = real(a, b, *args, **kw)
+        if Path(b).name.startswith(".importing-"):    # the top-level copy (copytree recurses)
+            (Path(b) / "data" / "extra.txt").write_text("a disk fault")
+        return out
+    monkeypatch.setattr(importer.shutil, "copytree", faulty_copy)
+    s = importer.import_package(pkg, tmp_path / "ws", trust)
+    assert not s["imported"] and "not byte-identical" in s["reason"]
+    assert not list((tmp_path / "ws" / "packages").iterdir())
+
+
+def test_missing_records_are_refused_and_caveats_are_stated(mission, tmp_path, monkeypatch):
+    pkg, trust = mission
+    real = importer.verify
+
+    def records_missing(p, t, timeout=None, profile=None):
+        code, rep = real(p, t, timeout, profile)
+        rep["verification"]["verdicts"]["completeness"] = "fail"
+        rep["verification"]["status"] = "failed"
+        return 1, rep
+    monkeypatch.setattr(importer, "verify", records_missing)
+    s = importer.import_package(pkg, tmp_path / "ws", trust)
+    assert not s["imported"] and "completeness" in s["reason"] and not s["fully_verified"]
+    monkeypatch.setattr(importer, "verify", real)
+    n = importer.import_package(pkg, tmp_path / "ws2", None)
+    assert n["imported"] and not n["fully_verified"]
+    assert any(c.startswith("authenticity not assessed") for c in n["caveats"])
+    text = Path(n["summary"]).read_text()
+    assert "NOT FULLY VERIFIED" in text and "Fully verified:" not in text
+
+
+def test_a_clean_trusted_package_is_fully_verified(mission, tmp_path):
+    pkg, trust = mission
+    profile = trust.parent / "profile.json"   # the mission's own profile (simulated clock, no region)
+    s = importer.import_package(pkg, tmp_path / "ws", trust, profile=profile)
+    assert s["imported"] and s["verification_status"] == "verified"
+    assert s["fully_verified"], s["caveats"]
+    assert "Fully verified:" in Path(s["summary"]).read_text()
+
+
+def test_a_verifier_that_does_not_finish_imports_nothing(mission, tmp_path, monkeypatch):
+    pkg, trust = mission
+    seen = {}
+
+    def hangs(cmd, **kw):
+        seen["timeout"] = kw.get("timeout")
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+    monkeypatch.setenv("CURSIV_VERIFY_TIMEOUT", "5")
+    monkeypatch.setattr(importer.subprocess, "run", hangs)
+    s = importer.import_package(pkg, tmp_path / "ws", trust)
+    assert seen["timeout"] == 5.0 and not s["imported"] and "did not finish within 5 s" in s["reason"]
+    assert not (tmp_path / "ws" / "packages").exists()
+
+
 def test_unsupported_contract_version_is_refused(mission, tmp_path):
     pkg, trust = mission
     future = tmp_path / "future" / pkg.name
